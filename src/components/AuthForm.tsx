@@ -82,9 +82,30 @@ const AuthForm = ({ onSuccess }: AuthFormProps) => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-grid-black/[0.02] bg-[size:20px_20px]" />
-      
+    <div className="relative min-h-screen flex items-center justify-center p-4">
+      {/* Wave Background */}
+      <div className="absolute bottom-0 left-0 w-full h-1/2">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 1440 320"
+          className="w-full h-full"
+          preserveAspectRatio="none"
+        >
+          <path
+            fill="url(#gradient)"
+            fillOpacity="1"
+            d="M0,128L48,144C96,160,192,192,288,186.7C384,181,480,139,576,122.7C672,107,768,117,864,144C960,171,1056,213,1152,224C1248,235,1344,213,1392,202.7L1440,192L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z"
+          ></path>
+          <defs>
+            <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" style={{ stopColor: "#6C63FF", stopOpacity: 1 }} />
+              <stop offset="100%" style={{ stopColor: "#FF6F91", stopOpacity: 1 }} />
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+
+      {/* Auth Card */}
       <Card className="w-full max-w-md relative z-10 shadow-2xl border-0 bg-white/80 backdrop-blur-sm">
         <CardHeader className="text-center pb-8">
           <div className="w-16 h-16 bg-gradient-to-r from-purple-500 to-pink-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
@@ -97,7 +118,6 @@ const AuthForm = ({ onSuccess }: AuthFormProps) => {
             {isLogin ? "Sign in to your account" : "Create your account"}
           </p>
         </CardHeader>
-        
         <CardContent>
           {/* Social Login Buttons */}
           <div className="space-y-2 mb-4">

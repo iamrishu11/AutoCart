@@ -264,6 +264,16 @@ function extractProductFromPurchaseIntent(message: string): string | null {
   return null;
 }
 
+function generateConversationTitle(messages: Message[], createdAt: string): string {
+  const firstUserMessage = messages.find(msg => msg.sender === 'user')?.content;
+  if (firstUserMessage) {
+    const trimmed = firstUserMessage.trim().slice(0, 30);
+    return trimmed.length < firstUserMessage.length ? `${trimmed}...` : trimmed;
+  }
+  const date = new Date(createdAt);
+  return `Chat: ${date.toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })}`;
+}
+
 function detectIntent(message: string, context: { lastIntent: string | null; categories: string[] }) {
   const msg = message.trim().toLowerCase();
   if (!isQueryAllowed(msg)) return "banned";
@@ -331,6 +341,7 @@ const Dashboard = () => {
   const [emailNotifications, setEmailNotifications] = useState(true);
   const [smsNotifications, setSmsNotifications] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [isChatHistoryOpen, setIsChatHistoryOpen] = useState(false);
 
   // Chat State
   const [messages, setMessages] = useState<Message[]>([]);
@@ -339,6 +350,8 @@ const Dashboard = () => {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [conversationPage, setConversationPage] = useState(1);
   const [hasMoreConversations, setHasMoreConversations] = useState(true);
+  const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
+  const [newConversationTitle, setNewConversationTitle] = useState("");
 
   // Refs
   const userNameRef = useRef<string | null>(null);
@@ -368,6 +381,53 @@ const Dashboard = () => {
       return itemSum;
     }, 0);
   }, 0);
+
+
+  // Save message
+  const saveMessage = useCallback(async (conversationId: string, sender: 'user' | 'ai', content: string) => {
+    try {
+      const { error } = await supabase.from('messages').insert({
+        conversation_id: conversationId,
+        sender,
+        content,
+        timestamp: new Date().toISOString(),
+      });
+      if (error) throw error;
+      await supabase
+        .from('conversations')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', conversationId);
+    } catch (error) {
+      console.error('Error saving message:', error);
+      toast.error("Failed to save message.");
+    }
+  }, []);
+
+  // New rename conversation function
+  const renameConversation = useCallback(async (conversationId: string, newTitle: string) => {
+    if (!newTitle.trim()) {
+      toast.error("Conversation title cannot be empty.");
+      return;
+    }
+    try {
+      const { error } = await supabase
+        .from('conversations')
+        .update({ title: newTitle.trim(), updated_at: new Date().toISOString() })
+        .eq('id', conversationId);
+      if (error) throw error;
+      setConversations(prev =>
+        prev.map(conv =>
+          conv.id === conversationId ? { ...conv, title: newTitle.trim() } : conv
+        )
+      );
+      setRenamingConversationId(null);
+      setNewConversationTitle("");
+      toast.success("Conversation renamed successfully.");
+    } catch (error) {
+      console.error('Error renaming conversation:', error);
+      toast.error("Failed to rename conversation.");
+    }
+  }, []);
 
   // Load user data
   const loadUserData = useCallback(async () => {
@@ -406,6 +466,61 @@ const Dashboard = () => {
     }
   }, [user]);
 
+
+  // Load messages
+  const loadMessages = useCallback(async (conversationId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', conversationId)
+        .order('timestamp', { ascending: true });
+      if (error) throw error;
+      setMessages(data.map((msg, idx) => ({
+        id: idx + 1,
+        sender: msg.sender as 'user' | 'ai',
+        content: msg.content,
+        timestamp: new Date(msg.timestamp),
+      })));
+    } catch (error) {
+      console.error('Error loading messages:', error);
+      toast.error("Failed to load messages.");
+    }
+  }, []);
+
+  // Start new chat
+  const startNewChat = useCallback(async () => {
+    if (!user) return;
+    try {
+      const createdAt = new Date().toISOString();
+      const { data, error } = await supabase.from('conversations').insert({
+        user_id: user.id,
+        title: `New Chat`,
+        created_at: createdAt,
+        updated_at: createdAt,
+      }).select().single();
+      if (error) throw error;
+      setConversations(prev => [data, ...prev]);
+      setActiveConversationId(data.id);
+      setMessages([{
+        id: 1,
+        sender: "ai",
+        content: "👋 Welcome to AutoCart! I'm your personal shopping assistant. What can I help you find today?",
+        timestamp: new Date()
+      }]);
+      await saveMessage(data.id, 'ai', "👋 Welcome to AutoCart! I'm your personal shopping assistant. What can I help you find today?");
+      lastIntentRef.current = null;
+      lastQueryRef.current = "";
+      lastPageRef.current = 0;
+      lastShownProductsRef.current = [];
+      lastSelectedProductRef.current = null;
+      setIsChatHistoryOpen(false);
+    } catch (error) {
+      console.error('Error creating new conversation:', error);
+      toast.error("Failed to start new chat.");
+    }
+  }, [user, saveMessage]);
+
   // Load conversations
   const loadConversations = useCallback(async (page: number) => {
     if (!user) return;
@@ -429,79 +544,7 @@ const Dashboard = () => {
       console.error('Error loading conversations:', error);
       toast.error("Failed to load chat history.");
     }
-  }, [user, activeConversationId]);
-
-  // Load messages
-  const loadMessages = useCallback(async (conversationId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', conversationId)
-        .order('timestamp', { ascending: true });
-      if (error) throw error;
-      setMessages(data.map((msg, idx) => ({
-        id: idx + 1,
-        sender: msg.sender as 'user' | 'ai',
-        content: msg.content,
-        timestamp: new Date(msg.timestamp),
-      })));
-    } catch (error) {
-      console.error('Error loading messages:', error);
-      toast.error("Failed to load messages.");
-    }
-  }, []);
-
-  // Save message
-  const saveMessage = useCallback(async (conversationId: string, sender: 'user' | 'ai', content: string) => {
-    try {
-      const { error } = await supabase.from('messages').insert({
-        conversation_id: conversationId,
-        sender,
-        content,
-        timestamp: new Date().toISOString(),
-      });
-      if (error) throw error;
-      await supabase
-        .from('conversations')
-        .update({ updated_at: new Date().toISOString() })
-        .eq('id', conversationId);
-    } catch (error) {
-      console.error('Error saving message:', error);
-      toast.error("Failed to save message.");
-    }
-  }, []);
-
-  // Start new chat
-  const startNewChat = useCallback(async () => {
-    if (!user) return;
-    try {
-      const { data, error } = await supabase.from('conversations').insert({
-        user_id: user.id,
-        title: `Chat on ${new Date().toLocaleDateString()}`,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }).select().single();
-      if (error) throw error;
-      setConversations(prev => [data, ...prev]);
-      setActiveConversationId(data.id);
-      setMessages([{
-        id: 1,
-        sender: "ai",
-        content: "👋 Welcome to AutoCart! I'm your personal shopping assistant. What can I help you find today?",
-        timestamp: new Date()
-      }]);
-      await saveMessage(data.id, 'ai', "👋 Welcome to AutoCart! I'm your personal shopping assistant. What can I help you find today?");
-      lastIntentRef.current = null;
-      lastQueryRef.current = "";
-      lastPageRef.current = 0;
-      lastShownProductsRef.current = [];
-      lastSelectedProductRef.current = null;
-    } catch (error) {
-      console.error('Error creating new conversation:', error);
-      toast.error("Failed to start new chat.");
-    }
-  }, [user, saveMessage]);
+  }, [user, activeConversationId, startNewChat, loadMessages]);
 
   // Delete conversation
   const deleteConversation = useCallback(async (conversationId: string) => {
@@ -523,6 +566,7 @@ const Dashboard = () => {
         }
       }
       toast.success("Conversation deleted.");
+      setIsChatHistoryOpen(false);
     } catch (error) {
       console.error('Error deleting conversation:', error);
       toast.error("Failed to delete conversation.");
@@ -743,6 +787,21 @@ const Dashboard = () => {
     setMessages(prev => [...prev, newMessage]);
     setInputMessage("");
     await saveMessage(activeConversationId, 'user', trimmedMessage);
+    const isFirstUserMessage = !messages.some(msg => msg.sender === 'user');
+    if (isFirstUserMessage) {
+      const newTitle = trimmedMessage.slice(0, 30);
+      await supabase
+        .from('conversations')
+        .update({ title: newTitle.length < trimmedMessage.length ? `${newTitle}...` : newTitle })
+        .eq('id', activeConversationId);
+      setConversations(prev =>
+        prev.map(conv =>
+          conv.id === activeConversationId
+            ? { ...conv, title: newTitle.length < trimmedMessage.length ? `${newTitle}...` : newTitle }
+            : conv
+        )
+      );
+    }
     const allCategories = Array.from(new Set(products.map(p => p.product_category))).filter(Boolean);
     const intent = detectIntent(trimmedMessage, { lastIntent: lastIntentRef.current, categories: allCategories });
     if (isReferringToLastProduct(trimmedMessage) && lastShownProductsRef.current.length > 0) {
@@ -1124,6 +1183,7 @@ const Dashboard = () => {
     lastPageRef.current = 0;
     lastShownProductsRef.current = [];
     lastSelectedProductRef.current = null;
+    setIsChatHistoryOpen(false);
   }, [loadMessages]);
 
   if (loading) {
@@ -1271,120 +1331,252 @@ const Dashboard = () => {
                   </CardContent>
                 </Card>
               )}
-              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                <Card className="lg:col-span-1 bg-white/80 backdrop-blur-sm border-purple-100">
-                  <CardHeader>
-                    <CardTitle className="flex items-center text-purple-700">
-                      <MessageCircle className="w-5 h-5 mr-2" />
-                      Chat History
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <Button
-                      onClick={startNewChat}
-                      className="w-full mb-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
-                      disabled={!user}
+              <Card className="bg-white/90 backdrop-blur-sm border-purple-100 rounded-xl shadow-lg overflow-hidden h-[36rem] flex flex-col">
+                <CardHeader className="flex flex-row items-center justify-between px-4 py-3 border-b border-purple-100 bg-white/80 ">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setIsChatHistoryOpen(!isChatHistoryOpen)}
+                    className="text-gray-600 hover:text-purple-700 p-2"
+                    aria-label={isChatHistoryOpen ? "Close chat history" : "Open chat history"}
+                  >
+                    <svg
+                      className="w-6 h-6"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
                     >
-                      New Chat
-                    </Button>
-                    <ScrollArea className="h-64">
-                      {conversations.map(conv => (
-                        <div
-                          key={conv.id}
-                          className={`flex items-center justify-between p-2 rounded-lg mb-2 ${
-                            activeConversationId === conv.id ? 'bg-purple-100' : 'hover:bg-gray-100'
-                          }`}
-                        >
-                          <div
-                            className="flex-1 cursor-pointer truncate"
-                            onClick={() => selectConversation(conv.id)}
-                            title={conv.title || `Chat ${new Date(conv.created_at).toLocaleDateString()}`}
-                          >
-                            {conv.title || `Chat ${new Date(conv.created_at).toLocaleDateString()}`}
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => deleteConversation(conv.id)}
-                            className="text-red-600 hover:text-red-800"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      ))}
-                      {hasMoreConversations && (
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d={isChatHistoryOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"}
+                      />
+                    </svg>
+                  </Button>
+                  <div className="flex items-center text-purple-700">
+                    <MessageCircle className="w-5 h-5 mr-2" aria-hidden="true" />
+                    <CardTitle className="text-base font-semibold">AutoCart AI</CardTitle>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <div className="w-2 h-2 bg-green-400 rounded-full" />
+                    <span className="text-xs text-gray-600">Online</span>
+                  </div>
+                </CardHeader>
+                <CardContent className="flex flex-row h-full p-0 overflow-hidden">
+                  <div
+                    className={`flex flex-col w-64 bg-white/95 border-r border-purple-100 transition-transform duration-300 ease-in-out z-20 h-full absolute top-0 left-0 sm:w-56 md:w-64 absolute top-0 left-0 md:absolute ${
+                      isChatHistoryOpen ? 'translate-x-0' : '-translate-x-full'
+                    }`}
+                  >
+                    <div className="flex flex-col h-full p-3 sm:p-2">
+                      <div className="flex items-center justify-between mb-4 sm:mb-3">
                         <Button
-                          onClick={loadMoreConversations}
-                          variant="outline"
-                          className="w-full mt-2 border-purple-200 hover:bg-purple-50"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setIsChatHistoryOpen(!isChatHistoryOpen)}
+                          className="text-gray-600 hover:text-purple-700 p-1 sm:p-0.5"
+                          aria-label={isChatHistoryOpen ? "Close chat history" : "Open chat history"}
                         >
-                          Load More
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isChatHistoryOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"} />
+                          </svg>
                         </Button>
-                      )}
-                    </ScrollArea>
-                  </CardContent>
-                </Card>
-                <Card className="lg:col-span-3 h-96 bg-white/80 backdrop-blur-sm border-purple-100">
-                  <CardHeader>
-                    <CardTitle className="flex items-center text-purple-700">
-                      <MessageCircle className="w-5 h-5 mr-2" />
-                      Chat with AutoCart AI
-                      <div className="ml-auto flex items-center">
-                        <div className="w-2 h-2 bg-green-400 rounded-full mr-2"></div>
-                        <span className="text-sm text-gray-600">Online</span>
+                        <h3 className="text-base font-semibold text-purple-700 sm:text-sm">History</h3>
+                        <div className="w-5 h-5"></div> {/* Spacer for alignment */}
                       </div>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="flex flex-col h-full p-0">
-                    <ScrollArea className="flex-1 p-4 space-y-4">
+                      <Button
+                        onClick={startNewChat}
+                        className="w-full mb-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-2 text-sm font-medium sm:text-xs sm:py-1.5"
+                        disabled={!user}
+                        aria-label="Start new chat"
+                      >
+                        + New Chat
+                      </Button>
+                      <ScrollArea className="flex-1">
+                        {conversations.length === 0 ? (
+                          <p className="text-sm text-gray-500 text-center py-4 sm:text-xs">No chats yet. Start a new one!</p>
+                        ) : (
+                          conversations.map(conv => (
+                            <div
+                              key={conv.id}
+                              className={`flex items-center justify-between p-2 rounded-lg mb-1 transition-colors cursor-pointer sm:p-1.5 ${
+                                activeConversationId === conv.id
+                                  ? 'bg-purple-100 text-purple-700'
+                                  : 'hover:bg-gray-50 text-gray-800'
+                              }`}
+                            >
+                              {renamingConversationId === conv.id ? (
+                                <div className="flex-1 flex items-center space-x-1.5 sm:space-x-1">
+                                  <input
+                                    type="text"
+                                    value={newConversationTitle}
+                                    onChange={(e) => setNewConversationTitle(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        renameConversation(conv.id, newConversationTitle);
+                                      } else if (e.key === 'Escape') {
+                                        setRenamingConversationId(null);
+                                        setNewConversationTitle('');
+                                      }
+                                    }}
+                                    className="flex-1 px-2 py-1 text-sm border border-purple-200 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white sm:text-xs sm:py-0.5"
+                                    placeholder="Chat title"
+                                    autoFocus
+                                    aria-label="Rename chat"
+                                  />
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => renameConversation(conv.id, newConversationTitle)}
+                                    className="text-green-600 hover:text-green-800 p-1 sm:p-0.5"
+                                    aria-label="Save new title"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => {
+                                      setRenamingConversationId(null);
+                                      setNewConversationTitle('');
+                                    }}
+                                    className="text-red-600 hover:text-red-800 p-1 sm:p-0.5"
+                                    aria-label="Cancel renaming"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  </Button>
+                                </div>
+                              ) : (
+                                <div className="flex-1 flex items-center space-x-1.5 sm:space-x-1">
+                                  <div
+                                    className="flex-1 truncate text-sm font-medium sm:text-xs"
+                                    onClick={() => selectConversation(conv.id)}
+                                    title={conv.title || generateConversationTitle(messages, conv.created_at)}
+                                    aria-label={`Select chat: ${conv.title || generateConversationTitle(messages, conv.created_at)}`}
+                                  >
+                                    {conv.title || generateConversationTitle(messages, conv.created_at)}
+                                  </div>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => {
+                                      setRenamingConversationId(conv.id);
+                                      setNewConversationTitle(conv.title || generateConversationTitle(messages, conv.created_at));
+                                    }}
+                                    className="text-gray-500 hover:text-purple-700 p-1 sm:p-0.5"
+                                    aria-label="Rename chat"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15.828H9v-2.828l8.586-8.586z"
+                                      />
+                                    </svg>
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => deleteConversation(conv.id)}
+                                    className="text-gray-500 hover:text-red-600 p-1 sm:p-0.5"
+                                    aria-label="Delete chat"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                        {hasMoreConversations && (
+                          <Button
+                            onClick={loadMoreConversations}
+                            variant="ghost"
+                            className="w-full mt-2 text-purple-600 hover:bg-purple-50 text-sm sm:text-xs"
+                            aria-label="Load more chats"
+                          >
+                            Load More
+                          </Button>
+                        )}
+                      </ScrollArea>
+                    </div>
+                  </div>
+                  <div
+                    className={`flex flex-col flex-1 h-full transition-all duration-300 ${
+                      isChatHistoryOpen ? 'opacity-50 pointer-events-none' : ''
+                    }`}
+                  >
+                    <ScrollArea className="flex-1 px-4 py-6 space-y-6 bg-gray-50/50 sm:px-3">
                       {messages.length === 0 && (
-                        <div className="text-center text-gray-500">Select a conversation or start a new chat.</div>
+                        <div className="text-center text-gray-500 py-12">
+                          <p className="text-sm sm:text-xs">Select a chat or start a new one to begin.</p>
+                        </div>
                       )}
                       {messages.map((message, idx) => (
                         <div
                           key={message.id}
                           ref={idx === messages.length - 1 ? chatEndRef : undefined}
-                          className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                          className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} mb-6`}
                         >
                           <div
-                            className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+                            className={`max-w-[70%] p-4 rounded-2xl shadow-sm sm:p-3 sm:text-sm ${
                               message.sender === 'user'
                                 ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
-                                : 'bg-gray-100 text-gray-800'
+                                : 'bg-white text-gray-800 border border-purple-100'
                             }`}
                           >
-                            <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                            <p className="text-xs opacity-70 mt-1">
-                              {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            <p className="text-sm leading-relaxed whitespace-pre-wrap sm:text-xs">{message.content}</p>
+                            <p className="text-xs opacity-60 mt-2 sm:text-[10px]">
+                              {message.timestamp.toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
                             </p>
                           </div>
                         </div>
                       ))}
                     </ScrollArea>
-                    <div className="border-t border-purple-100 p-4">
-                      <div className="flex space-x-2">
-                        <input
-                          type="text"
+                    <div className="border-t border-purple-100 p-4 bg-white/90 sm:p-3">
+                      <div className="max-w-3xl mx-auto flex space-x-3 sm:space-x-2">
+                        <textarea
                           value={inputMessage}
-                          onChange={(e) => setInputMessage(e.target.value)}
-                          onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-                          placeholder="Ask me anything about shopping..."
-                          className="flex-1 px-3 py-2 border border-purple-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white/80"
+                          onChange={(e) => {
+                            setInputMessage(e.target.value);
+                            const textarea = e.target;
+                            textarea.style.height = 'auto'; // Reset height
+                            textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 48), 156)}px`; // Set height between min (48px) and max (128px)
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              sendMessage();
+                            }
+                          }}
+                          placeholder="Ask about products, orders, or anything else..."
+                          className="flex-1 px-4 py-3 border border-purple-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white text-gray-800 text-sm sm:text-xs sm:px-3 sm:py-2 min-h-12 max-h-32 overflow-y-auto resize-none"
                           aria-label="Chat with AutoCart AI"
                           disabled={!user || !activeConversationId}
                         />
                         <Button
                           onClick={sendMessage}
-                          className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
-                          disabled={!user || !activeConversationId}
+                          className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-xl p-3 sm:p-2.5"
+                          disabled={!user || !activeConversationId || !inputMessage.trim()}
+                          aria-label="Send message"
                         >
-                          <Send className="w-4 h-4" />
+                          <Send className="w-5 h-5 sm:w-4 sm:h-4" />
                         </Button>
                       </div>
                     </div>
-                  </CardContent>
-                </Card>
-              </div>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
           </div>
         </main>
@@ -1480,123 +1672,66 @@ const Dashboard = () => {
                   </div>
                   <div className="ml-3 text-sm">
                     <label htmlFor="sms-notifications" className="font-medium text-gray-700">SMS Notifications</label>
-                    <p className="text-gray-500">Receive text messages for urgent payment issues.</p>
+                    <p className="text-gray-500">Receive SMS notifications for critical updates.</p>
                   </div>
                 </div>
               </div>
-            </div>
-            <div className="pt-5">
-              <div className="flex justify-end">
-                <Button
-                  className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
-                  onClick={handleSaveProfile}
-                  disabled={savingProfile}
-                >
+              <div className="flex justify-end space-x-3">
+                <Button variant="outline" onClick={() => setShowSettings(false)} className="border-purple-200 hover:bg-purple-50">
+                  Cancel
+                </Button>
+                <Button onClick={handleSaveProfile} className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600" disabled={savingProfile}>
                   {savingProfile ? 'Saving...' : 'Save Changes'}
                 </Button>
               </div>
             </div>
           </DialogContent>
         </Dialog>
-        <Dialog open={showWallet} onOpenChange={(open) => {
-          setShowWallet(open);
-          if (!open) setWalletError(null);
-        }}>
-          <DialogContent className="max-w-md text-center">
+        <Dialog open={showWallet} onOpenChange={setShowWallet}>
+          <DialogContent className="max-w-lg">
             <DialogHeader>
-              <DialogTitle>Connect Your Wallet</DialogTitle>
+              <DialogTitle>Connect Payman Wallet</DialogTitle>
               <DialogDescription>
-                Connect your Payman wallet to make secure payments.
+                {walletError ? (
+                  <p className="text-red-500">{walletError}</p>
+                ) : (
+                  'Connecting to your Payman wallet. Please complete the authentication in the popup window.'
+                )}
               </DialogDescription>
             </DialogHeader>
-            <div className="py-6">
-              {walletConnected ? (
-                <div className="text-green-600 font-semibold py-6">
-                  Wallet connected successfully! <Wallet className="inline w-5 h-5 ml-1" />
-                </div>
-              ) : walletError ? (
-                <div className="text-red-600 font-semibold py-6">
-                  {walletError}
-                  <Button
-                    variant="outline"
-                    className="mt-4 border-purple-200 hover:bg-purple-50"
-                    onClick={handleConnectWallet}
-                  >
-                    Try Again
-                  </Button>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center py-6">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600 mb-4"></div>
-                  <p className="text-gray-600">Connecting to Payman wallet...</p>
-                  <p className="text-sm text-gray-500 mt-2">Please complete the authentication in the popup window.</p>
-                </div>
-              )}
-            </div>
           </DialogContent>
         </Dialog>
         <Dialog open={showPayment} onOpenChange={setShowPayment}>
-          <DialogContent className="max-w-md">
+          <DialogContent className="max-w-lg">
             <DialogHeader>
               <DialogTitle>Confirm Payment</DialogTitle>
-              <DialogDescription>
-                Please confirm your purchase details.
-              </DialogDescription>
             </DialogHeader>
-            <div className="py-4">
-              {lastSelectedProductRef.current && (
-                <div className="space-y-2">
-                  <p><strong>Product:</strong> {lastSelectedProductRef.current.product_name}</p>
-                  <p><strong>Price:</strong> ${lastSelectedProductRef.current.offer_price ?? lastSelectedProductRef.current.product_price}</p>
-                  <p><strong>Seller:</strong> {lastSelectedProductRef.current.product_seller}</p>
-                  <p><strong>Quantity:</strong> 1</p>
+            {lastSelectedProductRef.current && (
+              <div className="space-y-4">
+                <div className="flex items-center space-x-4">
+                  <img src="/placeholder-product.jpg" alt="Product" className="w-16 h-16 rounded-lg" />
+                  <div>
+                    <h3 className="font-semibold">{lastSelectedProductRef.current.product_name}</h3>
+                    <p className="text-sm text-gray-600">
+                      ${lastSelectedProductRef.current.offer_price ?? lastSelectedProductRef.current.product_price}
+                    </p>
+                  </div>
                 </div>
-              )}
-              {paymentStatus === 'processing' && (
-                <div className="flex justify-center items-center py-4">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-purple-600 mr-2"></div>
-                  <p className="text-gray-600">Processing payment...</p>
+                <div className="border-t pt-4">
+                  <p className="text-sm text-gray-700">Pay using your connected Payman wallet.</p>
                 </div>
-              )}
-              {paymentStatus === 'error' && (
-                <div className="text-red-600 font-semibold py-4 text-center">
-                  Payment failed. Please try again or contact support.
+                <div className="flex justify-end space-x-3">
+                  <Button variant="outline" onClick={() => setShowPayment(false)} className="border-purple-200 hover:bg-purple-50">
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={() => handlePaymentConfirmation(lastSelectedProductRef.current!)}
+                    className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+                    disabled={paymentStatus === 'processing'}
+                  >
+                    {paymentStatus === 'processing' ? 'Processing...' : 'Confirm Payment'}
+                  </Button>
                 </div>
-              )}
-              {paymentStatus === 'success' && (
-                <div className="text-green-600 font-semibold py-4 text-center">
-                  Payment successful! Your order has been placed.
-                </div>
-              )}
-            </div>
-            {paymentStatus === 'idle' && lastSelectedProductRef.current && (
-              <div className="flex justify-end space-x-2">
-                <Button
-                  variant="outline"
-                  className="border-purple-200 hover:bg-purple-50"
-                  onClick={() => setShowPayment(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
-                  onClick={() => handlePaymentConfirmation(lastSelectedProductRef.current!)}
-                >
-                  Confirm Payment
-                </Button>
-              </div>
-            )}
-            {(paymentStatus === 'error' || paymentStatus === 'success') && (
-              <div className="flex justify-end">
-                <Button
-                  className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
-                  onClick={() => {
-                    setShowPayment(false);
-                    setPaymentStatus('idle');
-                  }}
-                >
-                  Close
-                </Button>
               </div>
             )}
           </DialogContent>

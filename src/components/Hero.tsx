@@ -1,13 +1,18 @@
-
 import { Button } from "@/components/ui/button";
 import { ShoppingBag, Bot, Zap, CreditCard, Truck, MessageCircle, Star, ArrowRight } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
 
 const Hero = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const handleStartShopping = () => {
-    navigate('/dashboard');
+    if (!user) {
+      navigate('/auth');
+    } else {
+      navigate('/dashboard');
+    }
   };
 
   const scrollToFeatures = () => {
