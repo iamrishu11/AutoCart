@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Bot, User, Settings, ShoppingBag, Package, MessageCircle, Send, Home, LogOut, TrendingUp, Truck, Wallet } from "lucide-react";
+import { Bot, User, Settings, ShoppingBag, Package, MessageCircle, Send, Home, LogOut, TrendingUp, Truck, Wallet, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
@@ -12,7 +12,7 @@ import { Tables } from "@/integrations/supabase/types";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { PaymanClient } from "@paymanai/payman-ts";
 import { paymanService } from '@/services/PaymanService';
-
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 // =================================================================================
 // Constants
@@ -21,7 +21,8 @@ import { paymanService } from '@/services/PaymanService';
 const BANNED_KEYWORDS = [
   /hack|exploit|cheat|illegal|adult|nsfw|porn|weapon|drugs|crypto|bitcoin|ethereum|nft|gamble|casino|bet/i
 ];
-const PAGE_SIZE = window.innerWidth < 768 ? 2 : 3; // Smaller screens show fewer items
+const PAGE_SIZE = window.innerWidth < 768 ? 2 : 3; // Products per page
+const CONVERSATION_PAGE_SIZE = 10; // Conversations per page
 const PRODUCT_INTENTS = [
   'list_products', 'select_product', 'pagination', 'yes', 'no', 'list_categories'
 ];
@@ -30,7 +31,6 @@ const PRODUCT_INTENTS = [
 // Helper Functions (Pure)
 // =================================================================================
 
-// Levenshtein distance for typo-tolerant string comparison
 function levenshtein(a: string, b: string): number {
   const matrix = Array.from({ length: a.length + 1 }, (_, i) => [i]);
   for (let j = 1; j <= b.length; j++) matrix[0][j] = j;
@@ -40,9 +40,9 @@ function levenshtein(a: string, b: string): number {
         matrix[i][j] = matrix[i - 1][j - 1];
       } else {
         matrix[i][j] = Math.min(
-          matrix[i - 1][j] + 1, // deletion
-          matrix[i][j - 1] + 1, // insertion
-          matrix[i - 1][j - 1] + 1 // substitution
+          matrix[i - 1][j] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j - 1] + 1
         );
       }
     }
@@ -145,7 +145,6 @@ function fuzzyMatchProduct(query: string, products: Tables<'products'>[], thresh
 function enhancedFuzzyMatchProduct(query: string, products: Tables<'products'>[], threshold = 3) {
   const normalize = (str: string) => str.toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9]/g, '');
   const normalizedQuery = normalize(query);
-
   return products.filter(p => {
     const normalizedName = normalize(p.product_name);
     return normalizedName.includes(normalizedQuery) || levenshtein(normalizedQuery, normalizedName) <= threshold;
@@ -159,9 +158,7 @@ function refinedFuzzyMatchProduct(query: string, products: Tables<'products'>[],
     .replace(/[^a-z0-9 ]/g, '')
     .replace(/\b(do|you|have|can|please|find|show|me|any|a|an|the)\b/g, '')
     .trim();
-
   const normalizedQuery = normalize(query);
-
   return products.filter(p => {
     const normalizedName = normalize(p.product_name);
     const normalizedTags = (p.product_tags || []).map(tag => normalize(tag));
@@ -186,7 +183,6 @@ async function callGeminiAPI(userQuery: string, matchedProducts: Tables<'product
   const chatHistory = history.map(m => `${m.sender === 'user' ? (userName || 'User') : 'AI'}: ${m.content}`).join('\n');
   const lastProductDetails = lastSelectedProduct ? `\nLast selected product:\n${lastSelectedProduct.product_name} - $${lastSelectedProduct.product_price}${lastSelectedProduct.offer_price ? ` (Offer: $${lastSelectedProduct.offer_price})` : ''} | Qty: ${lastSelectedProduct.stock_quantity} | Category: ${lastSelectedProduct.product_category} | Seller: ${lastSelectedProduct.product_seller} | Rating: ${lastSelectedProduct.product_rating}` : '';
   const prompt = `You are AutoCart's helpful shopping assistant. Always use the user's name if you know it.\n\nChat so far:\n${chatHistory}\n\nUser query: "${userQuery}"\n\nLast user intent: ${lastIntent || 'none'}\n\nMatched products (numbered):\n${numberedList}${lastProductDetails}\n\nSTRICT FORMAT INSTRUCTIONS:\nWhen listing products, use this exact format for each product (one block per product, no product IDs, no extra text):\n\n1. Product Name - $̶OriginalPrice̶ (Offer for today: $OfferPrice)\nQty: X\nCategory: Y\nSeller: Z\nRating: N\n\nIf there is no offer, just show the price (no strikethrough, no offer line). If no product matches, reply exactly: "No, we don’t have this product currently. Let me know if you need anything else.\"\n\nNever return a single-line or compressed product list. Always use the above block format for each product.\n`;
-  
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY as string;
   if (!apiKey) {
     console.error("VITE_GEMINI_API_KEY is not set in your environment variables.");
@@ -213,7 +209,6 @@ function extractCategoryFromQuery(query: string, categories: string[]): string |
   const lower = query.toLowerCase();
   for (const cat of categories) {
     const catLower = cat.toLowerCase();
-    // Match only if the category is a full word in the query
     if (
       lower === catLower ||
       lower.split(/\W+/).includes(catLower) ||
@@ -253,24 +248,17 @@ function getMoreCount(message: string): number | null {
 
 function getStatusColor(status: string) {
   switch (status) {
-    case 'delivered':
-      return 'text-green-600 bg-green-100';
+    case 'delivered': return 'text-green-600 bg-green-100';
     case 'shipped':
-    case 'in_transit':
-      return 'text-blue-600 bg-blue-100';
-    case 'processing':
-      return 'text-yellow-600 bg-yellow-100';
-    default:
-      return 'text-gray-600 bg-gray-100';
+    case 'in_transit': return 'text-blue-600 bg-blue-100';
+    case 'processing': return 'text-yellow-600 bg-yellow-100';
+    default: return 'text-gray-600 bg-gray-100';
   }
 }
 
-// Extracts the product name or query from a purchase intent message
 function extractProductFromPurchaseIntent(message: string): string | null {
-  // Try to extract product name after keywords like "buy", "purchase", "order", etc.
   const match = message.match(/\b(?:buy|purchase|order|checkout|pay for|want to buy|want to purchase|please purchase|purchase this|buy this|order this|confirm purchase)\b\s*(.*)/i);
   if (match && match[1]) {
-    // Remove trailing punctuation and trim
     return match[1].replace(/[.?!,;:]+$/, '').trim() || null;
   }
   return null;
@@ -278,31 +266,24 @@ function extractProductFromPurchaseIntent(message: string): string | null {
 
 function detectIntent(message: string, context: { lastIntent: string | null; categories: string[] }) {
   const msg = message.trim().toLowerCase();
-
   if (!isQueryAllowed(msg)) return "banned";
   if (isGreeting(msg)) return "greeting";
   if (isAskName(msg)) return "ask_name";
   if (extractName(msg)) return "set_name";
   if (isNameOnly(msg)) return "set_name";
-
-  // If we are currently awaiting confirmation, prioritize "yes" and "purchase"
   if (context.lastIntent === "awaiting_confirmation") {
     if (isYes(msg)) return "yes";
     if (/\b(buy|purchase|order|checkout|pay|want to buy|want to purchase|please purchase|purchase this|buy this|order this|confirm purchase)\b/i.test(msg)) return "purchase";
   }
-
-  // Otherwise, prioritize product selection first
   if (isProductSelection(msg) !== null) return "select_product";
   if (isYes(msg)) return "yes";
   if (isNo(msg)) return "no";
-
   if (/\boffer(s)?\b|deal(s)?|discount(s)?|sale(s)?/i.test(msg)) return "offers";
   if (isProductCategoryQuery(msg) || /categor(y|ies)/i.test(msg)) return "list_categories";
   if (context.categories && extractCategoryFromQuery(msg, context.categories)) return "list_products_by_category";
   if (/\b(products?|items?|show me (products|items)|list (products|items)|what (do you|can you) (have|offer)|all (products|items)|something tech|tech products|electronics)\b/i.test(msg)) return "list_products";
   if (/\bmore\b|next|show me more|see more|\d+\s*more/i.test(msg)) return "pagination";
   if (/\b(buy|purchase|order|checkout|pay|want to buy|want to purchase|please purchase|purchase this|buy this|order this|confirm purchase)\b/i.test(msg)) return "purchase";
-
   return "fallback";
 }
 
@@ -310,10 +291,23 @@ function detectIntent(message: string, context: { lastIntent: string | null; cat
 // Dashboard Component
 // =================================================================================
 
-// Define the shape of an order item for type safety
 interface OrderItem {
   product_id: string;
   quantity: number;
+}
+
+interface Conversation {
+  id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface Message {
+  id: number;
+  sender: 'user' | 'ai';
+  content: string;
+  timestamp: Date;
 }
 
 const Dashboard = () => {
@@ -328,22 +322,42 @@ const Dashboard = () => {
   const [showPayment, setShowPayment] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<"idle" | "processing" | "success" | "error">("idle");
   const [walletError, setWalletError] = useState<string | null>(null);
+  const [showOrders, setShowOrders] = useState(false);
+  const [showPackages, setShowPackages] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showWallet, setShowWallet] = useState(false);
+  const [walletConnected, setWalletConnected] = useState(false);
+  const [editProfile, setEditProfile] = useState({ full_name: '', company: '' });
+  const [emailNotifications, setEmailNotifications] = useState(true);
+  const [smsNotifications, setSmsNotifications] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
 
-  // Calculate total saved from orders
+  // Chat State
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inputMessage, setInputMessage] = useState("");
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [conversationPage, setConversationPage] = useState(1);
+  const [hasMoreConversations, setHasMoreConversations] = useState(true);
+
+  // Refs
+  const userNameRef = useRef<string | null>(null);
+  const lastShownProductsRef = useRef<Tables<'products'>[]>([]);
+  const lastSelectedProductRef = useRef<Tables<'products'> | null>(null);
+  const lastQueryRef = useRef<string>("");
+  const lastPageRef = useRef<number>(0);
+  const lastIntentRef = useRef<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Calculate total saved
   const totalSaved = orders.reduce((sum, order) => {
-    // Safely check if items is an array and validate each item
     const items: OrderItem[] = Array.isArray(order.items)
       ? order.items
-          .filter((item) =>
-            typeof item === 'object' && item !== null
-          )
-          .map((item) => {
-            const obj = item as { [key: string]: unknown };
-            return {
-              product_id: typeof obj['product_id'] === 'string' ? obj['product_id'] : '',
-              quantity: typeof obj['quantity'] === 'number' ? obj['quantity'] : 0,
-            };
-          })
+          .filter((item) => typeof item === 'object' && item !== null)
+          .map((item) => ({
+            product_id: (item as any).product_id || '',
+            quantity: (item as any).quantity || 0,
+          }))
           .filter((item): item is OrderItem => !!item.product_id && item.quantity > 0)
       : [];
     return sum + items.reduce((itemSum, item) => {
@@ -355,44 +369,10 @@ const Dashboard = () => {
     }, 0);
   }, 0);
 
-  // Chat State
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      sender: "ai",
-      content: "👋 Welcome to AutoCart! I'm your personal shopping assistant. What can I help you find today?",
-      timestamp: new Date()
-    }
-  ]);
-  const [inputMessage, setInputMessage] = useState("");
-
-  // Modal State
-  const [showOrders, setShowOrders] = useState(false);
-  const [showPackages, setShowPackages] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showWallet, setShowWallet] = useState(false);
-  const [walletConnected, setWalletConnected] = useState(false);
-
-  // Settings Modal State
-  const [editProfile, setEditProfile] = useState({ full_name: '', company: '' });
-  const [emailNotifications, setEmailNotifications] = useState(true);
-  const [smsNotifications, setSmsNotifications] = useState(false);
-  const [savingProfile, setSavingProfile] = useState(false);
-
-  // Refs for tracking chat context and state
-  const userNameRef = useRef<string | null>(null);
-  const lastShownProductsRef = useRef<Tables<'products'>[]>([]);
-  const lastSelectedProductRef = useRef<Tables<'products'> | null>(null);
-  const lastQueryRef = useRef<string>("");
-  const lastPageRef = useRef<number>(0);
-  const lastIntentRef = useRef<string | null>(null);
-  const chatEndRef = useRef<HTMLDivElement | null>(null);
-
-  // Data Loading
+  // Load user data
   const loadUserData = useCallback(async () => {
     if (!user) return;
     try {
-      // Load profile, settings, orders, and packages in parallel
       const [
         { data: profileData },
         { data: settingsData },
@@ -404,13 +384,9 @@ const Dashboard = () => {
         supabase.from('orders').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
         supabase.from('packages').select('*').eq('user_id', user.id).order('created_at', { ascending: false })
       ]);
-
       if (profileData) {
         setProfile(profileData);
-        setEditProfile({
-          full_name: profileData.full_name || '',
-          company: profileData.company || '',
-        });
+        setEditProfile({ full_name: profileData.full_name || '', company: profileData.company || '' });
       }
       if (settingsData) {
         setEmailNotifications(settingsData.email_notifications ?? true);
@@ -424,17 +400,153 @@ const Dashboard = () => {
       }
     } catch (error) {
       console.error('Error loading user data:', error);
-      toast.error("Failed to load your data. Please try again later.");
+      toast.error("Failed to load your data.");
     } finally {
       setLoading(false);
     }
   }, [user]);
 
+  // Load conversations
+  const loadConversations = useCallback(async (page: number) => {
+    if (!user) return;
+    try {
+      const { data, error } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('updated_at', { ascending: false })
+        .range((page - 1) * CONVERSATION_PAGE_SIZE, page * CONVERSATION_PAGE_SIZE - 1);
+      if (error) throw error;
+      setConversations(prev => page === 1 ? data : [...prev, ...data]);
+      setHasMoreConversations(data.length === CONVERSATION_PAGE_SIZE);
+      if (page === 1 && data.length > 0 && !activeConversationId) {
+        setActiveConversationId(data[0].id);
+        await loadMessages(data[0].id);
+      } else if (page === 1 && data.length === 0) {
+        await startNewChat();
+      }
+    } catch (error) {
+      console.error('Error loading conversations:', error);
+      toast.error("Failed to load chat history.");
+    }
+  }, [user, activeConversationId]);
+
+  // Load messages
+  const loadMessages = useCallback(async (conversationId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', conversationId)
+        .order('timestamp', { ascending: true });
+      if (error) throw error;
+      setMessages(data.map((msg, idx) => ({
+        id: idx + 1,
+        sender: msg.sender as 'user' | 'ai',
+        content: msg.content,
+        timestamp: new Date(msg.timestamp),
+      })));
+    } catch (error) {
+      console.error('Error loading messages:', error);
+      toast.error("Failed to load messages.");
+    }
+  }, []);
+
+  // Save message
+  const saveMessage = useCallback(async (conversationId: string, sender: 'user' | 'ai', content: string) => {
+    try {
+      const { error } = await supabase.from('messages').insert({
+        conversation_id: conversationId,
+        sender,
+        content,
+        timestamp: new Date().toISOString(),
+      });
+      if (error) throw error;
+      await supabase
+        .from('conversations')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', conversationId);
+    } catch (error) {
+      console.error('Error saving message:', error);
+      toast.error("Failed to save message.");
+    }
+  }, []);
+
+  // Start new chat
+  const startNewChat = useCallback(async () => {
+    if (!user) return;
+    try {
+      const { data, error } = await supabase.from('conversations').insert({
+        user_id: user.id,
+        title: `Chat on ${new Date().toLocaleDateString()}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).select().single();
+      if (error) throw error;
+      setConversations(prev => [data, ...prev]);
+      setActiveConversationId(data.id);
+      setMessages([{
+        id: 1,
+        sender: "ai",
+        content: "👋 Welcome to AutoCart! I'm your personal shopping assistant. What can I help you find today?",
+        timestamp: new Date()
+      }]);
+      await saveMessage(data.id, 'ai', "👋 Welcome to AutoCart! I'm your personal shopping assistant. What can I help you find today?");
+      lastIntentRef.current = null;
+      lastQueryRef.current = "";
+      lastPageRef.current = 0;
+      lastShownProductsRef.current = [];
+      lastSelectedProductRef.current = null;
+    } catch (error) {
+      console.error('Error creating new conversation:', error);
+      toast.error("Failed to start new chat.");
+    }
+  }, [user, saveMessage]);
+
+  // Delete conversation
+  const deleteConversation = useCallback(async (conversationId: string) => {
+    try {
+      const { error } = await supabase.from('conversations').delete().eq('id', conversationId);
+      if (error) throw error;
+      setConversations(prev => prev.filter(conv => conv.id !== conversationId));
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(null);
+        setMessages([]);
+        if (conversations.length > 1) {
+          const nextConv = conversations.find(conv => conv.id !== conversationId);
+          if (nextConv) {
+            setActiveConversationId(nextConv.id);
+            await loadMessages(nextConv.id);
+          }
+        } else {
+          await startNewChat();
+        }
+      }
+      toast.success("Conversation deleted.");
+    } catch (error) {
+      console.error('Error deleting conversation:', error);
+      toast.error("Failed to delete conversation.");
+    }
+  }, [activeConversationId, conversations, loadMessages, startNewChat]);
+
+  // Load more conversations
+  const loadMoreConversations = useCallback(() => {
+    setConversationPage(prev => prev + 1);
+  }, []);
+
+  // Initial data loading
   useEffect(() => {
     if (user) {
       loadUserData();
+      loadConversations(1);
     }
-  }, [user, loadUserData]);
+  }, [user, loadUserData, loadConversations]);
+
+  useEffect(() => {
+    if (user && conversationPage > 1) {
+      loadConversations(conversationPage);
+    }
+  }, [conversationPage, loadConversations, user]);
 
   useEffect(() => {
     const loadProducts = async () => {
@@ -454,7 +566,6 @@ const Dashboard = () => {
     }
   }, [user, profile?.full_name]);
 
-  // Auto-scroll to last message
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -473,7 +584,6 @@ const Dashboard = () => {
         .from('profiles')
         .update({ full_name: editProfile.full_name, company: editProfile.company })
         .eq('id', profile.id);
-
       const { error: settingsError } = await supabase
         .from('user_settings')
         .upsert({
@@ -481,9 +591,7 @@ const Dashboard = () => {
           email_notifications: emailNotifications,
           sms_notifications: smsNotifications,
         }, { onConflict: 'user_id' });
-
       if (profileError || settingsError) throw profileError || settingsError;
-
       toast.success('Updated Successfully!');
       setProfile(p => p ? { ...p, full_name: editProfile.full_name } : null);
     } catch (error) {
@@ -498,7 +606,6 @@ const Dashboard = () => {
     setShowWallet(true);
     setWalletError(null);
     console.log('Initiating Payman OAuth login');
-  
     const redirectUri = import.meta.env.VITE_PAYMAN_REDIRECT_URI;
     if (!redirectUri) {
       console.error('Missing Payman redirect URI.');
@@ -507,10 +614,8 @@ const Dashboard = () => {
       setShowWallet(false);
       return;
     }
-  
     const authUrl = paymanService.getOAuthAuthorizationUrl(redirectUri);
     const popup = window.open(authUrl, 'paymanOAuth', 'width=600,height=700');
-  
     if (!popup) {
       console.error('Failed to open Payman OAuth popup.');
       toast.error('Please allow popups and try again.');
@@ -518,7 +623,6 @@ const Dashboard = () => {
       setShowWallet(false);
       return;
     }
-  
     const handleMessage = (event: MessageEvent) => {
       console.log('Received message event:', event.data);
       if (event.data.type === 'payman-oauth-redirect') {
@@ -547,7 +651,6 @@ const Dashboard = () => {
         }
       }
     };
-  
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, []);
@@ -558,21 +661,13 @@ const Dashboard = () => {
       setShowPayment(false);
       return;
     }
-  
     setPaymentStatus('processing');
-  
     try {
       const amount = product.offer_price ?? product.product_price;
       const sellerEmail = `${product.product_seller.replace(/\s/g, '').toLowerCase()}@autocart.com`;
       const orderId = `ORD${Date.now()}${Math.floor(Math.random() * 1000)}`;
-    
-      // Create payee for seller if not exists
       await paymanService.createPayee(sellerEmail, product.product_seller);
-    
-      // Send payment from user's Payman account to seller's test wallet
       await paymanService.sendPayment(amount, product.product_seller, product.product_id, orderId);
-    
-      // Save order to Supabase
       const { data: orderData, error: orderError } = await supabase.from('orders').insert({
         user_id: user!.id,
         order_number: orderId,
@@ -581,10 +676,7 @@ const Dashboard = () => {
         items: [{ product_id: product.product_id, quantity: 1 }],
         created_at: new Date().toISOString(),
       }).select().single();
-    
       if (orderError) throw orderError;
-    
-      // Save package to Supabase
       const { error: packageError } = await supabase.from('packages').insert({
         user_id: user!.id,
         tracking_number: orderId,
@@ -594,16 +686,10 @@ const Dashboard = () => {
         carrier: 'AutoCart Logistics',
         order_id: orderData.id,
       });
-    
       if (packageError) throw packageError;
-    
-      // Update state
       setOrders(prev => [
         ...prev,
-        {
-          ...orderData,
-          items: [{ product_id: product.product_id, quantity: 1 }],
-        },
+        { ...orderData, items: [{ product_id: product.product_id, quantity: 1 }] },
       ]);
       setPackages(prev => [
         ...prev,
@@ -620,18 +706,19 @@ const Dashboard = () => {
           updated_at: new Date().toISOString(),
         },
       ]);
-    
-      // Show success message
+      const successMessage = `🎉 Payment successful! Your order tracking ID is: ${orderId}\nYou will receive updates about your order via email.`;
       setMessages(prev => [
         ...prev,
         {
           id: prev.length + 1,
           sender: 'ai',
-          content: `🎉 Payment successful! Your order tracking ID is: ${orderId}\nYou will receive updates about your order via email.`,
+          content: successMessage,
           timestamp: new Date(),
         },
       ]);
-    
+      if (activeConversationId) {
+        await saveMessage(activeConversationId, 'ai', successMessage);
+      }
       setPaymentStatus('success');
     } catch (error) {
       console.error('Payment error:', error);
@@ -642,313 +729,263 @@ const Dashboard = () => {
       lastSelectedProductRef.current = null;
       lastIntentRef.current = null;
     }
-  }, [user]);
+  }, [user, activeConversationId, saveMessage]);
 
   const sendMessage = useCallback(async () => {
     const trimmedMessage = inputMessage.trim();
-    if (!trimmedMessage) return;
-
-    const newMessage = {
+    if (!trimmedMessage || !user || !activeConversationId) return;
+    const newMessage: Message = {
       id: messages.length + 1,
-      sender: "user" as const,
+      sender: "user",
       content: trimmedMessage,
       timestamp: new Date()
     };
     setMessages(prev => [...prev, newMessage]);
     setInputMessage("");
-
+    await saveMessage(activeConversationId, 'user', trimmedMessage);
     const allCategories = Array.from(new Set(products.map(p => p.product_category))).filter(Boolean);
     const intent = detectIntent(trimmedMessage, { lastIntent: lastIntentRef.current, categories: allCategories });
-
-    // --- CONTEXTUAL PRODUCT SELECTION LOGIC ---
-    // If user says "this one", "that one", "it", etc., and a product was shown/selected, treat as selection
-    if (
-      isReferringToLastProduct(trimmedMessage) &&
-      lastShownProductsRef.current.length > 0
-    ) {
-      // If a product was just listed, select the last shown or last selected
+    if (isReferringToLastProduct(trimmedMessage) && lastShownProductsRef.current.length > 0) {
       const prod = lastSelectedProductRef.current || lastShownProductsRef.current[0];
       if (prod) {
         lastSelectedProductRef.current = prod;
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: `Product: ${prod.product_name}\nPrice: $${prod.product_price}${prod.offer_price ? ` (Offer: $${prod.offer_price})` : ""}\nAvailable: ${prod.stock_quantity}\nCategory: ${prod.product_category}\nSeller: ${prod.product_seller}\nRating: ${prod.product_rating}\nWould you like to proceed with the purchase?`,
-            timestamp: new Date()
-          }
-        ]);
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: `Product: ${prod.product_name}\nPrice: $${prod.product_price}${prod.offer_price ? ` (Offer: $${prod.offer_price})` : ""}\nAvailable: ${prod.stock_quantity}\nCategory: ${prod.product_category}\nSeller: ${prod.product_seller}\nRating: ${prod.product_rating}\nWould you like to proceed with the purchase?`,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         lastIntentRef.current = "select_product";
         return;
       }
     }
-
     switch (intent) {
-      case "banned":
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: "Please ask about available products.",
-            timestamp: new Date()
-          }
-        ]);
+      case "banned": {
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: "Please ask about available products.",
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         break;
-
-      case "greeting":
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: `Hello ${userNameRef.current || profile?.full_name || "User"}! How can I help you today?`,
-            timestamp: new Date()
-          }
-        ]);
+      }
+      case "greeting": {
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: `Hello ${userNameRef.current || profile?.full_name || "User"}! How can I help you today?`,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         break;
-
-      case "ask_name":
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: `Your name is ${userNameRef.current || profile?.full_name || "User"}.`,
-            timestamp: new Date()
-          }
-        ]);
+      }
+      case "ask_name": {
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: `Your name is ${userNameRef.current || profile?.full_name || "User"}.`,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         break;
-
+      }
       case "set_name": {
         const name = extractName(trimmedMessage) || trimmedMessage;
         userNameRef.current = name.charAt(0).toUpperCase() + name.slice(1);
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: `Nice to meet you, ${userNameRef.current}! How can I help you today?`,
-            timestamp: new Date()
-          }
-        ]);
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: `Nice to meet you, ${userNameRef.current}! How can I help you today?`,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         break;
       }
-
       case "yes": {
-        console.log('Yes intent triggered', {
-          walletConnected,
-          lastIntent: lastIntentRef.current,
-          selectedProduct: lastSelectedProductRef.current,
-          showPayment
-        });
-
         if (!walletConnected) {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "❌ Please connect your wallet first to make purchases. Click on 'Connect Wallet' in the sidebar.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "❌ Please connect your wallet first to make purchases. Click on 'Connect Wallet' in the sidebar.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
           return;
         }
-
         if (lastIntentRef.current === "awaiting_confirmation" && lastSelectedProductRef.current) {
           setShowPayment(true);
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: `💳 Processing your purchase for: ${lastSelectedProductRef.current.product_name} for $${lastSelectedProductRef.current.offer_price ?? lastSelectedProductRef.current.product_price}.\nPlease confirm the payment in your wallet...`,
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: `💳 Processing your purchase for: ${lastSelectedProductRef.current.product_name} for $${lastSelectedProductRef.current.offer_price ?? lastSelectedProductRef.current.product_price}.\nPlease confirm the payment in your wallet...`,
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
           lastIntentRef.current = "awaiting_payment";
-          console.log('Transitioning to awaiting_payment', { showPayment: true });
           return;
         }
-      
-        // Fallback logic
         if (lastShownProductsRef.current.length > 0) {
           const prod = lastShownProductsRef.current[0];
           lastSelectedProductRef.current = prod;
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: `Product: ${prod.product_name}\nPrice: $${prod.product_price}${prod.offer_price ? ` (Offer: $${prod.offer_price})` : ""}\nAvailable: ${prod.stock_quantity}\nCategory: ${prod.product_category}\nSeller: ${prod.product_seller}\nRating: ${prod.product_rating}\nWould you like to proceed with the purchase?`,
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: `Product: ${prod.product_name}\nPrice: $${prod.product_price}${prod.offer_price ? ` (Offer: $${prod.offer_price})` : ""}\nAvailable: ${prod.stock_quantity}\nCategory: ${prod.product_category}\nSeller: ${prod.product_seller}\nRating: ${prod.product_rating}\nWould you like to proceed with the purchase?`,
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
           lastIntentRef.current = "awaiting_confirmation";
         } else {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "No product was selected previously.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "No product was selected previously.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         }
         break;
       }
-
-      case "no":
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: "No problem! Let me know if you want to see more products or need help with something else.",
-            timestamp: new Date()
-          }
-        ]);
+      case "no": {
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: "No problem! Let me know if you want to see more products or need help with something else.",
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         break;
-
+      }
       case "select_product": {
         const idx = isProductSelection(trimmedMessage);
         if (idx !== null && lastShownProductsRef.current.length > idx) {
           const prod = lastShownProductsRef.current[idx];
           lastSelectedProductRef.current = prod;
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: `Product: ${prod.product_name}\nPrice: $${prod.product_price}${prod.offer_price ? ` (Offer: $${prod.offer_price})` : ""}\nAvailable: ${prod.stock_quantity}\nCategory: ${prod.product_category}\nSeller: ${prod.product_seller}\nRating: ${prod.product_rating}\nWould you like to proceed with the purchase?`,
-              timestamp: new Date()
-            },
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: `Product: ${prod.product_name}\nPrice: $${prod.product_price}${prod.offer_price ? ` (Offer: $${prod.offer_price})` : ""}\nAvailable: ${prod.stock_quantity}\nCategory: ${prod.product_category}\nSeller: ${prod.product_seller}\nRating: ${prod.product_rating}\nWould you like to proceed with the purchase?`,
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
           lastIntentRef.current = "awaiting_confirmation";
         } else {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "Sorry, I couldn't identify which product you meant.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "Sorry, I couldn't identify which product you meant.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         }
         break;
       }
-
       case "offers": {
-        // Find all products with an offer
         const offerProducts = products.filter(p => p.offer_price && p.offer_price < p.product_price);
         if (offerProducts.length === 0) {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "Sorry, there are no special offers today.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "Sorry, there are no special offers today.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
           break;
         }
-        // Find categories with offers
         const offerCategories = Array.from(new Set(offerProducts.map(p => p.product_category))).filter(Boolean);
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: `We have special offers in these categories today: ${offerCategories.join(', ')}. Which category are you interested in?`,
-            timestamp: new Date()
-          }
-        ]);
-        // Save context for next step
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: `We have special offers in these categories today: ${offerCategories.join(', ')}. Which category are you interested in?`,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         lastIntentRef.current = "offers";
         lastQueryRef.current = "__offers__";
         break;
       }
-
-      case "list_categories":
-        setMessages(prev => [
-          ...prev,
-          {
-            id: prev.length + 1,
-            sender: "ai",
-            content: getProductCategoriesText(products),
-            timestamp: new Date()
-          }
-        ]);
+      case "list_categories": {
+        const aiMessage: Message = {
+          id: messages.length + 2,
+          sender: "ai",
+          content: getProductCategoriesText(products),
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        await saveMessage(activeConversationId, 'ai', aiMessage.content);
         break;
-
+      }
       case "list_products_by_category": {
         const cat = extractCategoryFromQuery(trimmedMessage, allCategories);
-        // Only show products in the exact category
         let productsInCat = products.filter(p => p.product_category && p.product_category.toLowerCase() === (cat || '').toLowerCase());
-        // If last intent was "offers", filter only offer products
         if (lastIntentRef.current === "offers") {
           productsInCat = productsInCat.filter(p => p.offer_price && p.offer_price < p.product_price);
         }
-        console.log("Products in category:", cat, productsInCat);
         if (productsInCat.length === 0) {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "No, we don’t have this product currently. Let me know if you need anything else.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "No, we don’t have this product currently. Let me know if you need anything else.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         } else {
           lastShownProductsRef.current = productsInCat.slice(0, PAGE_SIZE);
           lastQueryRef.current = cat || "";
           lastPageRef.current = 0;
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: getProductListText(lastShownProductsRef.current),
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: getProductListText(lastShownProductsRef.current),
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         }
         break;
       }
-
-      case "list_products":
+      case "list_products": {
         if (products.length === 0) {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "No, we don’t have this product currently. Let me know if you need anything else.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "No, we don’t have this product currently. Let me know if you need anything else.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         } else {
           lastShownProductsRef.current = products.slice(0, PAGE_SIZE);
           lastQueryRef.current = "__all__";
           lastPageRef.current = 0;
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: getProductListText(lastShownProductsRef.current),
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: getProductListText(lastShownProductsRef.current),
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         }
         break;
-
+      }
       case "pagination": {
         let matched: Tables<'products'>[] = [];
         if (lastQueryRef.current === "__all__") {
@@ -962,135 +999,114 @@ const Dashboard = () => {
         const nextPage = lastPageRef.current + 1;
         const start = nextPage * PAGE_SIZE;
         const pageProducts = matched.slice(start, start + moreCount);
-
         if (pageProducts.length === 0) {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "No more products found for your query.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "No more products found for your query.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         } else {
           lastShownProductsRef.current = pageProducts;
           lastPageRef.current = nextPage;
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: getProductListText(pageProducts, moreCount),
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: getProductListText(pageProducts, moreCount),
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         }
         break;
       }
-
       case "purchase": {
         if (!walletConnected) {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "❌ Please connect your wallet first to make purchases. Click on 'Connect Wallet' in the sidebar.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "❌ Please connect your wallet first to make purchases. Click on 'Connect Wallet' in the sidebar.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
           return;
         }
-
         const productQuery = extractProductFromPurchaseIntent(trimmedMessage);
         if (productQuery) {
-          // Search for the product using fuzzy match
           const matched = enhancedFuzzyMatchProduct(productQuery, products, 3);
-          
           if (matched.length > 0) {
-            // Found matching products, show them and save to context
             lastShownProductsRef.current = matched.slice(0, PAGE_SIZE);
             lastQueryRef.current = productQuery;
-            setMessages(prev => [
-              ...prev,
-              {
-                id: prev.length + 1,
-                sender: "ai",
-                content: getProductListText(lastShownProductsRef.current),
-                timestamp: new Date()
-              }
-            ]);
+            const aiMessage: Message = {
+              id: messages.length + 2,
+              sender: "ai",
+              content: getProductListText(lastShownProductsRef.current),
+              timestamp: new Date()
+            };
+            setMessages(prev => [...prev, aiMessage]);
+            await saveMessage(activeConversationId, 'ai', aiMessage.content);
           } else {
-            // No matching products found
-            setMessages(prev => [
-              ...prev,
-              {
-                id: prev.length + 1,
-                sender: "ai",
-                content: `Sorry, I couldn't find any products matching "${productQuery}". Please try searching for something else or browse our categories.`,
-                timestamp: new Date()
-              }
-            ]);
+            const aiMessage: Message = {
+              id: messages.length + 2,
+              sender: "ai",
+              content: `Sorry, I couldn't find any products matching "${productQuery}". Please try searching for something else or browse our categories.`,
+              timestamp: new Date()
+            };
+            setMessages(prev => [...prev, aiMessage]);
+            await saveMessage(activeConversationId, 'ai', aiMessage.content);
           }
           return;
         }
-
-        // If we're here, it means user just said "purchase" without specifying what
         const selected = lastSelectedProductRef.current;
         if (selected) {
           setShowPayment(true);
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: `Great choice! You're about to purchase: ${selected.product_name} for $${selected.offer_price ?? selected.product_price}. Please proceed with payment.`,
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: `Great choice! You're about to purchase: ${selected.product_name} for $${selected.offer_price ?? selected.product_price}. Please proceed with payment.`,
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
           lastIntentRef.current = "purchase";
         } else {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "Please select a product first before purchasing. You can search for products or browse our categories.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "Please select a product first before purchasing. You can search for products or browse our categories.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         }
         break;
       }
-
-      case "fallback":
       default: {
-        // Fuzzy product search as fallback
         const matched = refinedFuzzyMatchProduct(trimmedMessage, products);
         if (matched.length === 0) {
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: "No, we don’t have this product currently. Let me know if you need anything else.",
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: "No, we don’t have this product currently. Let me know if you need anything else.",
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         } else {
           lastShownProductsRef.current = matched.slice(0, PAGE_SIZE);
           lastQueryRef.current = trimmedMessage;
           lastPageRef.current = 0;
-          setMessages(prev => [
-            ...prev,
-            {
-              id: prev.length + 1,
-              sender: "ai",
-              content: getProductListText(lastShownProductsRef.current),
-              timestamp: new Date()
-            }
-          ]);
+          const aiMessage: Message = {
+            id: messages.length + 2,
+            sender: "ai",
+            content: getProductListText(lastShownProductsRef.current),
+            timestamp: new Date()
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          await saveMessage(activeConversationId, 'ai', aiMessage.content);
         }
         break;
       }
@@ -1098,9 +1114,18 @@ const Dashboard = () => {
     if (lastIntentRef.current !== "awaiting_confirmation") {
       lastIntentRef.current = intent;
     }
-  }, [inputMessage, messages, products, profile]);
+  }, [inputMessage, messages, products, profile, walletConnected, user, activeConversationId, saveMessage]);
 
-  // Render Logic
+  const selectConversation = useCallback(async (conversationId: string) => {
+    setActiveConversationId(conversationId);
+    await loadMessages(conversationId);
+    lastIntentRef.current = null;
+    lastQueryRef.current = "";
+    lastPageRef.current = 0;
+    lastShownProductsRef.current = [];
+    lastSelectedProductRef.current = null;
+  }, [loadMessages]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-50 flex items-center justify-center">
@@ -1112,12 +1137,9 @@ const Dashboard = () => {
   return (
     <ProtectedRoute>
       <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-50 relative">
-        {/* Grid Background */}
         <div className="absolute inset-0 z-0">
           <div className="w-full h-full bg-[radial-gradient(circle,rgba(168,85,247,0.08)_1px,transparent_1px)] bg-[size:32px_32px] dark:bg-[radial-gradient(circle,rgba(236,72,153,0.10)_1px,transparent_1px)] transition-colors duration-500" />
         </div>
-        
-        {/* Header */}
         <header className="bg-white/80 backdrop-blur-md shadow-lg border-b relative z-10">
           <div className="container mx-auto px-6 py-4">
             <div className="flex items-center justify-between">
@@ -1145,10 +1167,8 @@ const Dashboard = () => {
             </div>
           </div>
         </header>
-
         <main className="container mx-auto px-6 py-8 relative z-10">
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-            {/* Sidebar */}
             <aside className="lg:col-span-1">
               <Card className="mb-6 bg-white/80 backdrop-blur-sm border-purple-100">
                 <CardHeader>
@@ -1168,7 +1188,6 @@ const Dashboard = () => {
                   </div>
                 </CardContent>
               </Card>
-
               <Card className="bg-white/80 backdrop-blur-sm border-purple-100">
                 <CardHeader>
                   <CardTitle className="text-purple-700">Quick Actions</CardTitle>
@@ -1193,8 +1212,6 @@ const Dashboard = () => {
                 </CardContent>
               </Card>
             </aside>
-
-            {/* Main Content */}
             <div className="lg:col-span-3">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <Card className="bg-white/80 backdrop-blur-sm border-purple-100">
@@ -1208,7 +1225,6 @@ const Dashboard = () => {
                     </div>
                   </CardContent>
                 </Card>
-                
                 <Card className="bg-white/80 backdrop-blur-sm border-purple-100">
                   <CardContent className="p-6">
                     <div className="flex items-center justify-between">
@@ -1220,7 +1236,6 @@ const Dashboard = () => {
                     </div>
                   </CardContent>
                 </Card>
-                
                 <Card className="bg-white/80 backdrop-blur-sm border-purple-100">
                   <CardContent className="p-6">
                     <div className="flex items-center justify-between">
@@ -1233,8 +1248,6 @@ const Dashboard = () => {
                   </CardContent>
                 </Card>
               </div>
-
-              {/* Recent Orders */}
               {orders.length > 0 && (
                 <Card className="mb-8 bg-white/80 backdrop-blur-sm border-purple-100">
                   <CardHeader>
@@ -1258,66 +1271,123 @@ const Dashboard = () => {
                   </CardContent>
                 </Card>
               )}
-
-              {/* Chat Interface */}
-              <Card className="h-96 bg-white/80 backdrop-blur-sm border-purple-100">
-                <CardHeader>
-                  <CardTitle className="flex items-center text-purple-700">
-                    <MessageCircle className="w-5 h-5 mr-2" />
-                    Chat with AutoCart AI
-                    <div className="ml-auto flex items-center">
-                      <div className="w-2 h-2 bg-green-400 rounded-full mr-2"></div>
-                      <span className="text-sm text-gray-600">Online</span>
-                    </div>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="flex flex-col h-full p-0">
-                  <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                    {messages.map((message, idx) => (
-                      <div
-                        key={message.id}
-                        ref={idx === messages.length - 1 ? chatEndRef : undefined}
-                        className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
-                      >
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                <Card className="lg:col-span-1 bg-white/80 backdrop-blur-sm border-purple-100">
+                  <CardHeader>
+                    <CardTitle className="flex items-center text-purple-700">
+                      <MessageCircle className="w-5 h-5 mr-2" />
+                      Chat History
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <Button
+                      onClick={startNewChat}
+                      className="w-full mb-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+                      disabled={!user}
+                    >
+                      New Chat
+                    </Button>
+                    <ScrollArea className="h-64">
+                      {conversations.map(conv => (
                         <div
-                          className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
-                            message.sender === 'user'
-                              ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
-                              : 'bg-gray-100 text-gray-800'
+                          key={conv.id}
+                          className={`flex items-center justify-between p-2 rounded-lg mb-2 ${
+                            activeConversationId === conv.id ? 'bg-purple-100' : 'hover:bg-gray-100'
                           }`}
                         >
-                          <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                          <p className="text-xs opacity-70 mt-1">
-                            {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </p>
+                          <div
+                            className="flex-1 cursor-pointer truncate"
+                            onClick={() => selectConversation(conv.id)}
+                            title={conv.title || `Chat ${new Date(conv.created_at).toLocaleDateString()}`}
+                          >
+                            {conv.title || `Chat ${new Date(conv.created_at).toLocaleDateString()}`}
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => deleteConversation(conv.id)}
+                            className="text-red-600 hover:text-red-800"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
                         </div>
+                      ))}
+                      {hasMoreConversations && (
+                        <Button
+                          onClick={loadMoreConversations}
+                          variant="outline"
+                          className="w-full mt-2 border-purple-200 hover:bg-purple-50"
+                        >
+                          Load More
+                        </Button>
+                      )}
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+                <Card className="lg:col-span-3 h-96 bg-white/80 backdrop-blur-sm border-purple-100">
+                  <CardHeader>
+                    <CardTitle className="flex items-center text-purple-700">
+                      <MessageCircle className="w-5 h-5 mr-2" />
+                      Chat with AutoCart AI
+                      <div className="ml-auto flex items-center">
+                        <div className="w-2 h-2 bg-green-400 rounded-full mr-2"></div>
+                        <span className="text-sm text-gray-600">Online</span>
                       </div>
-                    ))}
-                  </div>
-
-                  <div className="border-t border-purple-100 p-4">
-                    <div className="flex space-x-2">
-                      <input
-                        type="text"
-                        value={inputMessage}
-                        onChange={(e) => setInputMessage(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-                        placeholder="Ask me anything about shopping..."
-                        className="flex-1 px-3 py-2 border border-purple-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white/80"
-                        aria-label="Chat with AutoCart AI"
-                      />
-                      <Button onClick={sendMessage} className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600">
-                        <Send className="w-4 h-4" />
-                      </Button>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="flex flex-col h-full p-0">
+                    <ScrollArea className="flex-1 p-4 space-y-4">
+                      {messages.length === 0 && (
+                        <div className="text-center text-gray-500">Select a conversation or start a new chat.</div>
+                      )}
+                      {messages.map((message, idx) => (
+                        <div
+                          key={message.id}
+                          ref={idx === messages.length - 1 ? chatEndRef : undefined}
+                          className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                        >
+                          <div
+                            className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+                              message.sender === 'user'
+                                ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
+                                : 'bg-gray-100 text-gray-800'
+                            }`}
+                          >
+                            <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                            <p className="text-xs opacity-70 mt-1">
+                              {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </ScrollArea>
+                    <div className="border-t border-purple-100 p-4">
+                      <div className="flex space-x-2">
+                        <input
+                          type="text"
+                          value={inputMessage}
+                          onChange={(e) => setInputMessage(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+                          placeholder="Ask me anything about shopping..."
+                          className="flex-1 px-3 py-2 border border-purple-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white/80"
+                          aria-label="Chat with AutoCart AI"
+                          disabled={!user || !activeConversationId}
+                        />
+                        <Button
+                          onClick={sendMessage}
+                          className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+                          disabled={!user || !activeConversationId}
+                        >
+                          <Send className="w-4 h-4" />
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
+                  </CardContent>
+                </Card>
+              </div>
             </div>
           </div>
         </main>
-
-        {/* Modals */}
         <Dialog open={showOrders} onOpenChange={setShowOrders}>
           <DialogContent className="max-w-lg">
             <DialogHeader><DialogTitle>My Orders</DialogTitle></DialogHeader>
@@ -1339,7 +1409,6 @@ const Dashboard = () => {
             </div>
           </DialogContent>
         </Dialog>
-
         <Dialog open={showPackages} onOpenChange={setShowPackages}>
           <DialogContent className="max-w-lg">
             <DialogHeader><DialogTitle>Track Packages</DialogTitle></DialogHeader>
@@ -1361,7 +1430,6 @@ const Dashboard = () => {
             </div>
           </DialogContent>
         </Dialog>
-
         <Dialog open={showSettings} onOpenChange={setShowSettings}>
           <DialogContent className="max-w-lg">
             <DialogHeader>
@@ -1430,7 +1498,6 @@ const Dashboard = () => {
             </div>
           </DialogContent>
         </Dialog>
-
         <Dialog open={showWallet} onOpenChange={(open) => {
           setShowWallet(open);
           if (!open) setWalletError(null);
@@ -1448,67 +1515,90 @@ const Dashboard = () => {
                   Wallet connected successfully! <Wallet className="inline w-5 h-5 ml-1" />
                 </div>
               ) : walletError ? (
-                <div className="text-red-600 font-semibold py-6">{walletError}</div>
+                <div className="text-red-600 font-semibold py-6">
+                  {walletError}
+                  <Button
+                    variant="outline"
+                    className="mt-4 border-purple-200 hover:bg-purple-50"
+                    onClick={handleConnectWallet}
+                  >
+                    Try Again
+                  </Button>
+                </div>
               ) : (
-                <div className="py-6">
-                  Connecting to Payman...
-                  <div id="payman-connect" className="mt-4"></div>
+                <div className="flex flex-col items-center py-6">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600 mb-4"></div>
+                  <p className="text-gray-600">Connecting to Payman wallet...</p>
+                  <p className="text-sm text-gray-500 mt-2">Please complete the authentication in the popup window.</p>
                 </div>
               )}
             </div>
           </DialogContent>
         </Dialog>
-
         <Dialog open={showPayment} onOpenChange={setShowPayment}>
-          <DialogContent className="max-w-md text-center">
+          <DialogContent className="max-w-md">
             <DialogHeader>
-              <DialogTitle>Complete Your Purchase</DialogTitle>
+              <DialogTitle>Confirm Payment</DialogTitle>
               <DialogDescription>
-                Confirm your purchase details and proceed with payment via your connected wallet.
+                Please confirm your purchase details.
               </DialogDescription>
             </DialogHeader>
-            <div className="py-6">
+            <div className="py-4">
               {lastSelectedProductRef.current && (
-                <div className="space-y-4">
-                  <div className="mb-4">
-                    <Wallet className="inline w-6 h-6 text-purple-600 mb-2" />
-                    <div className="font-semibold mb-2">
-                      {lastSelectedProductRef.current.product_name}
-                    </div>
-                    <div className="text-lg font-bold text-purple-700 mb-4">
-                      ${lastSelectedProductRef.current.offer_price ?? lastSelectedProductRef.current.product_price}
-                    </div>
-                  </div>
-                  <Button
-                    className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
-                    onClick={() => handlePaymentConfirmation(lastSelectedProductRef.current!)}
-                    disabled={paymentStatus === "processing"}
-                  >
-                    {paymentStatus === "processing" ? "Processing..." : "Confirm Payment"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="w-full mt-2"
-                    onClick={() => {
-                      setShowPayment(false);
-                      setPaymentStatus("idle");
-                      setMessages(prev => [
-                        ...prev,
-                        {
-                          id: prev.length + 1,
-                          sender: "ai",
-                          content: "Payment cancelled. Let me know if you need anything else!",
-                          timestamp: new Date(),
-                        },
-                      ]);
-                    }}
-                    disabled={paymentStatus === "processing"}
-                  >
-                    Cancel
-                  </Button>
+                <div className="space-y-2">
+                  <p><strong>Product:</strong> {lastSelectedProductRef.current.product_name}</p>
+                  <p><strong>Price:</strong> ${lastSelectedProductRef.current.offer_price ?? lastSelectedProductRef.current.product_price}</p>
+                  <p><strong>Seller:</strong> {lastSelectedProductRef.current.product_seller}</p>
+                  <p><strong>Quantity:</strong> 1</p>
+                </div>
+              )}
+              {paymentStatus === 'processing' && (
+                <div className="flex justify-center items-center py-4">
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-purple-600 mr-2"></div>
+                  <p className="text-gray-600">Processing payment...</p>
+                </div>
+              )}
+              {paymentStatus === 'error' && (
+                <div className="text-red-600 font-semibold py-4 text-center">
+                  Payment failed. Please try again or contact support.
+                </div>
+              )}
+              {paymentStatus === 'success' && (
+                <div className="text-green-600 font-semibold py-4 text-center">
+                  Payment successful! Your order has been placed.
                 </div>
               )}
             </div>
+            {paymentStatus === 'idle' && lastSelectedProductRef.current && (
+              <div className="flex justify-end space-x-2">
+                <Button
+                  variant="outline"
+                  className="border-purple-200 hover:bg-purple-50"
+                  onClick={() => setShowPayment(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+                  onClick={() => handlePaymentConfirmation(lastSelectedProductRef.current!)}
+                >
+                  Confirm Payment
+                </Button>
+              </div>
+            )}
+            {(paymentStatus === 'error' || paymentStatus === 'success') && (
+              <div className="flex justify-end">
+                <Button
+                  className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+                  onClick={() => {
+                    setShowPayment(false);
+                    setPaymentStatus('idle');
+                  }}
+                >
+                  Close
+                </Button>
+              </div>
+            )}
           </DialogContent>
         </Dialog>
       </div>
