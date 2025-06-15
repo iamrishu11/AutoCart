@@ -66,15 +66,17 @@ const AuthForm = ({ onSuccess }: AuthFormProps) => {
       const { error } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
-          redirectTo: `${window.location.origin}/dashboard`,
+          redirectTo: `${window.location.origin}/auth/callback`,
         },
       });
       if (error) {
+        console.error(`Error signing in with ${provider}:`, error);
         toast.error(error.message);
       } else {
-        toast.success('Redirecting to ' + provider.charAt(0).toUpperCase() + provider.slice(1));
+        toast.success(`Redirecting to ${provider.charAt(0).toUpperCase() + provider.slice(1)}...`);
       }
     } catch (error: any) {
+      console.error('Unexpected error during social login:', error);
       toast.error('An unexpected error occurred');
     } finally {
       setLoading(false);

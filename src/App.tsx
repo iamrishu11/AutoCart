@@ -11,6 +11,7 @@ import Dashboard from "./pages/Dashboard";
 import Auth from "./pages/Auth";
 import NotFound from "./pages/NotFound";
 import PaymanCallback from "./pages/PaymanCallback";
+import Callback from "./auth/callback/page";
 
 const queryClient = new QueryClient();
 
@@ -27,7 +28,8 @@ const App = () => (
           <Route path="/help-center" element={<HelpCenter />} />
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/oauth/callback" element={<PaymanCallback />} />
+          <Route path="/auth/callback" element={<Callback />} />
+          <Route path="/oauth/callback" element={<PaymanCallback />} /> 
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
