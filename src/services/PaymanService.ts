@@ -54,7 +54,7 @@ class PaymanService {
   }
 
   getOAuthAuthorizationUrl(redirectUri: string): string {
-    const authUrl = new URL('https://app.paymanai.com/oauth/connect');
+    const authUrl = new URL('https://app.paymanai.com/oauth/authorize');
     authUrl.searchParams.set('client_id', this.clientId);
     authUrl.searchParams.set('redirect_uri', redirectUri);
     authUrl.searchParams.set('scope', this.scopes);
