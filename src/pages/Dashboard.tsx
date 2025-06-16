@@ -381,9 +381,27 @@ const Dashboard = () => {
 
     document.body.appendChild(script);
 
-    // Cleanup script when dialog closes
+    // Check if the button rendered after a timeout
+    const timeout = setTimeout(() => {
+      const paymanButtonContainer = document.querySelector('#payman-connect-wallet');
+      const paymanButton = paymanButtonContainer?.querySelector('button');
+      if (!paymanButton) {
+        // If the button didn't render, show the fallback
+        const fallbackContainer = document.querySelector('#payman-connect-fallback');
+        if (fallbackContainer) {
+          (fallbackContainer as HTMLElement).style.display = 'block';
+        }
+      }
+    }, 3000); // Wait 3 seconds for the script to render the button
+
+    // Cleanup script and timeout when dialog closes
     return () => {
       document.body.removeChild(script);
+      clearTimeout(timeout);
+      const fallbackContainer = document.querySelector('#payman-connect-fallback');
+      if (fallbackContainer) {
+        (fallbackContainer as HTMLElement).style.display = 'none';
+      }
     };
   }, [showWallet]);
 
@@ -1787,8 +1805,19 @@ const Dashboard = () => {
                 Connect your Payman wallet to make secure payments. Click the button below to authenticate.
               </DialogDescription>
             </DialogHeader>
-            <div className="py-4 sm:py-3">
-              <div id="payman-connect-wallet"></div>
+            <div className="py-4 sm:py-3 flex justify-center">
+              <div id="payman-connect-wallet" className="min-h-[40px]"></div>
+              {/* Fallback button in case pm-connect.js fails to render */}
+              <div id="payman-connect-fallback" style={{ display: 'none' }}>
+                <Button
+                  className="w-full max-w-xs bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-2 sm:py-1.5"
+                  onClick={() => {
+                    window.location.href = `https://app.paymanai.com/oauth/authorize?client_id=pm-test-3BL-0TI1SH8P--0YibbhNWqD&redirect_uri=${encodeURIComponent('https://autocart-backend-8o8e.onrender.com/api/oauth/callback')}&response_type=code&scope=read_balance%20read_list_payees%20send_payments`;
+                  }}
+                >
+                  Connect with Payman (Fallback)
+                </Button>
+              </div>
             </div>
           </DialogContent>
         </Dialog>
