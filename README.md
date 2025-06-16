@@ -38,11 +38,9 @@ cd autocart
 ```
 
 ### 2. Install Dependencies
-Install the required packages for both the frontend and backend.
+Install the required packages.
 
-#### Frontend
 ```bash
-cd frontend
 npm install
 ```
 
