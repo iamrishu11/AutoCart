@@ -9,7 +9,7 @@ const app = express();
 
 // CORS configuration for local frontend
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: 'https://auto-cart.vercel.app',
   methods: ['GET', 'POST'],
   credentials: true
 }));
