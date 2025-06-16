@@ -364,6 +364,29 @@ const Dashboard = () => {
   const lastIntentRef = useRef<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
+  // Load Payman Connect script dynamically when wallet dialog opens
+  useEffect(() => {
+    if (!showWallet) return;
+
+    const script = document.createElement('script');
+    script.src = 'https://app.paymanai.com/js/pm-connect.js';
+    script.async = true;
+    script.setAttribute('data-client-id', 'pm-test-3BL-0TI1SH8P--0YibbhNWqD');
+    script.setAttribute('data-scopes', 'read_balance read_list_payees send_payments');
+    script.setAttribute('data-redirect-uri', 'https://autocart-backend-8o8e.onrender.com/api/oauth/callback');
+    script.setAttribute('data-target', '#payman-connect-wallet');
+    script.setAttribute('data-dark-mode', 'false');
+    script.setAttribute('strategy', 'afterInteractive');
+    script.setAttribute('data-styles', JSON.stringify({ borderRadius: '8px', fontSize: '14px' }));
+
+    document.body.appendChild(script);
+
+    // Cleanup script when dialog closes
+    return () => {
+      document.body.removeChild(script);
+    };
+  }, [showWallet]);
+
   // Calculate total saved
   const totalSaved = orders.reduce((sum, order) => {
     const items: OrderItem[] = Array.isArray(order.items)
@@ -1387,7 +1410,6 @@ const Dashboard = () => {
                     <CardTitle className="text-base font-semibold">AutoCart AI</CardTitle>
                   </div>
                   <div className="flex items-center space-x-2">
-                    <div id="payman-connect"></div> {/* Added Payman Connect button */}
                     <div className="w-2 h-2 bg-green-400 rounded-full" />
                     <span className="text-xs text-gray-600">Online</span>
                   </div>
@@ -1762,19 +1784,11 @@ const Dashboard = () => {
             <DialogHeader>
               <DialogTitle className="text-purple-700">Connect Payman Wallet</DialogTitle>
               <DialogDescription>
-                Connect your Payman wallet to make secure payments. You’ll be redirected to authenticate.
+                Connect your Payman wallet to make secure payments. Click the button below to authenticate.
               </DialogDescription>
             </DialogHeader>
             <div className="py-4 sm:py-3">
-              <Button
-                className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-2 sm:py-1.5"
-                onClick={() => {
-                  // Redirect to backend's OAuth initiation endpoint
-                  window.location.href = 'https://autocart-backend-8o8e.onrender.com/api/oauth/token';
-                }}
-              >
-                Connect with Payman
-              </Button>
+              <div id="payman-connect-wallet"></div>
             </div>
           </DialogContent>
         </Dialog>
