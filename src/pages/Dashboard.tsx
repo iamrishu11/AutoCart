@@ -372,7 +372,7 @@ const Dashboard = () => {
     script.src = 'https://app.paymanai.com/js/pm-connect.js';
     script.async = true;
     script.setAttribute('data-client-id', 'pm-test-3BL-0TI1SH8P--0YibbhNWqD');
-    script.setAttribute('data-scopes', 'read_balance read_list_payees send_payments');
+    script.setAttribute('data-scopes', 'read_balance read_list_payees send_payments create_payees');
     script.setAttribute('data-redirect-uri', 'https://autocart-backend-8o8e.onrender.com/api/oauth/callback');
     script.setAttribute('data-target', '#payman-connect-wallet');
     script.setAttribute('data-dark-mode', 'false');
