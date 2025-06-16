@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Bot, User, Settings, ShoppingBag, Package, MessageCircle, Send, Home, LogOut, TrendingUp, Truck, Wallet, Trash2 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom"; // Added useLocation
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
@@ -11,7 +11,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Tables } from "@/integrations/supabase/types";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { PaymanClient } from "@paymanai/payman-ts";
-import { paymanService } from '@/services/PaymanService';
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 // =================================================================================
@@ -322,6 +321,7 @@ interface Message {
 
 const Dashboard = () => {
   const { user, signOut } = useAuth();
+  const location = useLocation(); // Added to access URL params
 
   // State Management
   const [orders, setOrders] = useState<Tables<'orders'>[]>([]);
@@ -337,6 +337,8 @@ const Dashboard = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [showWallet, setShowWallet] = useState(false);
   const [walletConnected, setWalletConnected] = useState(false);
+  const [walletBalance, setWalletBalance] = useState<string | null>(null); // Added for wallet balance
+  const [accessToken, setAccessToken] = useState<string | null>(null); // Added for access token
   const [editProfile, setEditProfile] = useState({ full_name: '', company: '' });
   const [emailNotifications, setEmailNotifications] = useState(true);
   const [smsNotifications, setSmsNotifications] = useState(false);
@@ -382,6 +384,54 @@ const Dashboard = () => {
     }, 0);
   }, 0);
 
+  // Handle OAuth callback parameters (after backend redirects to /dashboard)
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const accessToken = params.get('access_token');
+    const expiresIn = params.get('expires_in');
+    const error = params.get('error');
+    const errorDescription = params.get('error_description');
+
+    if (error) {
+      setWalletError(`OAuth Error: ${error}${errorDescription ? ` - ${errorDescription}` : ''}`);
+      setShowWallet(false);
+      return;
+    }
+
+    if (accessToken) {
+      setAccessToken(accessToken);
+      setWalletConnected(true);
+      setShowWallet(false);
+      toast.success('Wallet connected successfully!');
+      window.history.replaceState({}, document.title, '/dashboard');
+    }
+  }, [location]);
+
+  // Fetch wallet balance after access token is available
+  useEffect(() => {
+    if (accessToken) {
+      const client = PaymanClient.withToken('pm-test-3BL-0TI1SH8P--0YibbhNWqD', {
+        accessToken,
+        expiresIn: 3600, // Default to 1 hour; adjust based on token response
+      });
+
+      client
+        .ask("what's my wallet balance?")
+        .then(balance => {
+          // If balance is an object, extract the string value
+          if (typeof balance === 'string') {
+            setWalletBalance(balance);
+          } else if (balance && typeof balance === 'object' && 'result' in balance) {
+            setWalletBalance((balance as any).result ?? JSON.stringify(balance));
+          } else {
+            setWalletBalance(JSON.stringify(balance));
+          }
+        })
+        .catch(error => {
+          setWalletError(`Failed to fetch wallet balance: ${error.message}`);
+        });
+    }
+  }, [accessToken]);
 
   // Save message
   const saveMessage = useCallback(async (conversationId: string, sender: 'user' | 'ai', content: string) => {
@@ -465,7 +515,6 @@ const Dashboard = () => {
       setLoading(false);
     }
   }, [user]);
-
 
   // Load messages
   const loadMessages = useCallback(async (conversationId: string) => {
@@ -649,79 +698,72 @@ const Dashboard = () => {
   const handleConnectWallet = useCallback(() => {
     setShowWallet(true);
     setWalletError(null);
-    console.log('Initiating Payman OAuth login');
-    const redirectUri = import.meta.env.VITE_PAYMAN_REDIRECT_URI;
-    if (!redirectUri) {
-      console.error('Missing Payman redirect URI.');
-      toast.error('Wallet connection failed: Missing configuration.');
-      setWalletError('Missing configuration.');
-      setShowWallet(false);
-      return;
-    }
-    const authUrl = paymanService.getOAuthAuthorizationUrl(redirectUri);
-    const popup = window.open(authUrl, 'paymanOAuth', 'width=600,height=700');
-    if (!popup) {
-      console.error('Failed to open Payman OAuth popup.');
-      toast.error('Please allow popups and try again.');
-      setWalletError('Popup blocked. Please allow popups.');
-      setShowWallet(false);
-      return;
-    }
-    const handleMessage = (event: MessageEvent) => {
-      console.log('Received message event:', event.data);
-      if (event.data.type === 'payman-oauth-redirect') {
-        const url = new URL(event.data.redirectUri);
-        const code = url.searchParams.get('code');
-        const error = url.searchParams.get('error');
-        if (code) {
-          paymanService.exchangeCodeForToken(code)
-            .then(() => {
-              setWalletConnected(true);
-              setShowWallet(false);
-              toast.success('Wallet connected successfully!');
-              popup.close();
-            })
-            .catch(() => {
-              setWalletError('Failed to connect wallet.');
-              setShowWallet(false);
-              popup.close();
-            });
-        } else if (error) {
-          console.error('OAuth error:', error);
-          toast.error('Authentication failed.');
-          setWalletError('Authentication failed.');
-          setShowWallet(false);
-          popup.close();
-        }
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
   }, []);
 
   const handlePaymentConfirmation = useCallback(async (product: Tables<'products'>) => {
-    if (!paymanService.isAuthenticated()) {
-      toast.error('Wallet not connected. Please connect your Payman wallet.');
-      setShowPayment(false);
-      return;
-    }
-    setPaymentStatus('processing');
-    try {
-      const amount = product.offer_price ?? product.product_price;
-      const sellerEmail = `${product.product_seller.replace(/\s/g, '').toLowerCase()}@autocart.com`;
-      const orderId = `ORD${Date.now()}${Math.floor(Math.random() * 1000)}`;
-      await paymanService.createPayee(sellerEmail, product.product_seller);
-      await paymanService.sendPayment(amount, product.product_seller, product.product_id, orderId);
-      const { data: orderData, error: orderError } = await supabase.from('orders').insert({
+  if (!accessToken) {
+    toast.error('Wallet not connected. Please connect your Payman wallet.');
+    setShowPayment(false);
+    return;
+  }
+  setPaymentStatus('processing');
+  try {
+    const client = PaymanClient.withToken('pm-test-3BL-0TI1SH8P--0YibbhNWqD', {
+      accessToken,
+      expiresIn: 3600,
+    });
+    const amount = product.offer_price ?? product.product_price;
+    const sellerEmail = `${product.product_seller.replace(/\s/g, '').toLowerCase()}@autocart.com`;
+    const orderId = `ORD${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+    // Create the payee if it doesn't exist
+    await client.ask(`create a new payee named ${product.product_seller} with email ${sellerEmail}`);
+
+    // Process the payment using client.ask with natural language
+    await client.ask(`pay $${amount} to ${product.product_seller}`, {
+      metadata: {
+        orderId,
+        productId: product.product_id,
+        description: `Purchase of ${product.product_name} via AutoCart`,
+      },
+    });
+
+    // Save order to Supabase
+    const { data: orderData, error: orderError } = await supabase
+      .from('orders')
+      .insert({
         user_id: user!.id,
         order_number: orderId,
         total_amount: amount,
         status: 'processing',
         items: [{ product_id: product.product_id, quantity: 1 }],
         created_at: new Date().toISOString(),
-      }).select().single();
-      if (orderError) throw orderError;
-      const { error: packageError } = await supabase.from('packages').insert({
+      })
+      .select()
+      .single();
+    if (orderError) throw orderError;
+
+    // Save package to Supabase
+    const { error: packageError } = await supabase.from('packages').insert({
+      user_id: user!.id,
+      tracking_number: orderId,
+      status: 'processing',
+      current_location: 'Warehouse',
+      estimated_delivery: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      carrier: 'AutoCart Logistics',
+      order_id: orderData.id,
+    });
+    if (packageError) throw packageError;
+
+    // Update state with new order and package
+    setOrders((prev) => [
+      ...prev,
+      { ...orderData, items: [{ product_id: product.product_id, quantity: 1 }] },
+    ]);
+    setPackages((prev) => [
+      ...prev,
+      {
+        id: orderId,
         user_id: user!.id,
         tracking_number: orderId,
         status: 'processing',
@@ -729,51 +771,36 @@ const Dashboard = () => {
         estimated_delivery: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
         carrier: 'AutoCart Logistics',
         order_id: orderData.id,
-      });
-      if (packageError) throw packageError;
-      setOrders(prev => [
-        ...prev,
-        { ...orderData, items: [{ product_id: product.product_id, quantity: 1 }] },
-      ]);
-      setPackages(prev => [
-        ...prev,
-        {
-          id: orderId,
-          user_id: user!.id,
-          tracking_number: orderId,
-          status: 'processing',
-          current_location: 'Warehouse',
-          estimated_delivery: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-          carrier: 'AutoCart Logistics',
-          order_id: orderData.id,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ]);
-      const successMessage = `🎉 Payment successful! Your order tracking ID is: ${orderId}\nYou will receive updates about your order via email.`;
-      setMessages(prev => [
-        ...prev,
-        {
-          id: prev.length + 1,
-          sender: 'ai',
-          content: successMessage,
-          timestamp: new Date(),
-        },
-      ]);
-      if (activeConversationId) {
-        await saveMessage(activeConversationId, 'ai', successMessage);
-      }
-      setPaymentStatus('success');
-    } catch (error) {
-      console.error('Payment error:', error);
-      toast.error('Payment failed. Please try again.');
-      setPaymentStatus('error');
-    } finally {
-      setShowPayment(false);
-      lastSelectedProductRef.current = null;
-      lastIntentRef.current = null;
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ]);
+
+    // Notify user of successful payment
+    const successMessage = `🎉 Payment successful! Your order tracking ID is: ${orderId}\nYou will receive updates about your order via email.`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: prev.length + 1,
+        sender: 'ai',
+        content: successMessage,
+        timestamp: new Date(),
+      },
+    ]);
+    if (activeConversationId) {
+      await saveMessage(activeConversationId, 'ai', successMessage);
     }
-  }, [user, activeConversationId, saveMessage]);
+    setPaymentStatus('success');
+  } catch (error) {
+    console.error('Payment error:', error);
+    toast.error('Payment failed. Please try again.');
+    setPaymentStatus('error');
+  } finally {
+    setShowPayment(false);
+    lastSelectedProductRef.current = null;
+    lastIntentRef.current = null;
+  }
+}, [user, activeConversationId, saveMessage, accessToken]);
 
   const sendMessage = useCallback(async () => {
     const trimmedMessage = inputMessage.trim();
@@ -1332,7 +1359,7 @@ const Dashboard = () => {
                 </Card>
               )}
               <Card className="bg-white/90 backdrop-blur-sm border-purple-100 rounded-xl shadow-lg overflow-hidden h-[36rem] flex flex-col">
-                <CardHeader className="flex flex-row items-center justify-between px-4 py-3 border-b border-purple-100 bg-white/80 ">
+                <CardHeader className="flex flex-row items-center justify-between px-4 py-3 border-b border-purple-100 bg-white/80">
                   <Button
                     variant="ghost"
                     size="sm"
@@ -1360,6 +1387,7 @@ const Dashboard = () => {
                     <CardTitle className="text-base font-semibold">AutoCart AI</CardTitle>
                   </div>
                   <div className="flex items-center space-x-2">
+                    <div id="payman-connect"></div> {/* Added Payman Connect button */}
                     <div className="w-2 h-2 bg-green-400 rounded-full" />
                     <span className="text-xs text-gray-600">Online</span>
                   </div>
@@ -1513,6 +1541,16 @@ const Dashboard = () => {
                       isChatHistoryOpen ? 'opacity-50 pointer-events-none' : ''
                     }`}
                   >
+                    <div className="px-4 py-4">
+                      {walletError && (
+                        <div className="text-red-600 text-sm mb-4">{walletError}</div>
+                      )}
+                      {walletBalance && (
+                        <div className="text-green-600 text-sm mb-4">
+                          Wallet Balance: {walletBalance}
+                        </div>
+                      )}
+                    </div>
                     <ScrollArea className="flex-1 px-4 py-6 space-y-6 bg-gray-50/50 sm:px-3">
                       {messages.length === 0 && (
                         <div className="text-center text-gray-500 py-12">
@@ -1522,52 +1560,41 @@ const Dashboard = () => {
                       {messages.map((message, idx) => (
                         <div
                           key={message.id}
-                          ref={idx === messages.length - 1 ? chatEndRef : undefined}
-                          className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} mb-6`}
+                          ref={idx === messages.length - 1 ? chatEndRef : null}
+                          className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} mb-4 sm:mb-3`}
                         >
                           <div
-                            className={`max-w-[70%] p-4 rounded-2xl shadow-sm sm:p-3 sm:text-sm ${
+                            className={`max-w-[75%] sm:max-w-[85%] rounded-xl p-4 sm:p-3 shadow-sm ${
                               message.sender === 'user'
                                 ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
                                 : 'bg-white text-gray-800 border border-purple-100'
                             }`}
                           >
-                            <p className="text-sm leading-relaxed whitespace-pre-wrap sm:text-xs">{message.content}</p>
-                            <p className="text-xs opacity-60 mt-2 sm:text-[10px]">
-                              {message.timestamp.toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })}
+                            <p className="text-sm sm:text-xs whitespace-pre-wrap">{message.content}</p>
+                            <p className="text-xs sm:text-[10px] mt-1 opacity-70">
+                              {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </p>
                           </div>
                         </div>
                       ))}
                     </ScrollArea>
-                    <div className="border-t border-purple-100 p-4 bg-white/90 sm:p-3">
-                      <div className="max-w-3xl mx-auto flex space-x-3 sm:space-x-2">
-                        <textarea
+                    <div className="border-t border-purple-100 p-4 sm:p-3 bg-white/80">
+                      <div className="flex items-center space-x-3 sm:space-x-2">
+                        <input
+                          type="text"
                           value={inputMessage}
-                          onChange={(e) => {
-                            setInputMessage(e.target.value);
-                            const textarea = e.target;
-                            textarea.style.height = 'auto'; // Reset height
-                            textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 48), 156)}px`; // Set height between min (48px) and max (128px)
-                          }}
+                          onChange={(e) => setInputMessage(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              sendMessage();
-                            }
+                            if (e.key === 'Enter') sendMessage();
                           }}
-                          placeholder="Ask about products, orders, or anything else..."
-                          className="flex-1 px-4 py-3 border border-purple-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white text-gray-800 text-sm sm:text-xs sm:px-3 sm:py-2 min-h-12 max-h-32 overflow-y-auto resize-none"
-                          aria-label="Chat with AutoCart AI"
-                          disabled={!user || !activeConversationId}
+                          placeholder="Ask about products, orders, or payments..."
+                          className="flex-1 px-4 py-2 sm:px-3 sm:py-1.5 text-sm sm:text-xs border border-purple-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white"
+                          aria-label="Type your message"
                         />
                         <Button
                           onClick={sendMessage}
-                          className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-xl p-3 sm:p-2.5"
-                          disabled={!user || !activeConversationId || !inputMessage.trim()}
+                          className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg p-2 sm:p-1.5"
+                          disabled={!inputMessage.trim()}
                           aria-label="Send message"
                         >
                           <Send className="w-5 h-5 sm:w-4 sm:h-4" />
@@ -1580,158 +1607,224 @@ const Dashboard = () => {
             </div>
           </div>
         </main>
+
+        {/* Orders Dialog */}
         <Dialog open={showOrders} onOpenChange={setShowOrders}>
-          <DialogContent className="max-w-lg">
-            <DialogHeader><DialogTitle>My Orders</DialogTitle></DialogHeader>
-            <div className="space-y-4 max-h-96 overflow-y-auto">
+          <DialogContent className="max-w-2xl sm:max-w-[90%] bg-white/95 backdrop-blur-sm border-purple-100">
+            <DialogHeader>
+              <DialogTitle className="text-purple-700">My Orders</DialogTitle>
+            </DialogHeader>
+            <ScrollArea className="max-h-[60vh] sm:max-h-[50vh]">
               {orders.length === 0 ? (
-                <p className="text-gray-500">No orders found.</p>
+                <p className="text-gray-500 text-center py-4 sm:text-sm">No orders found.</p>
               ) : (
-                orders.map(order => (
-                  <div key={order.id} className="p-4 border rounded-lg bg-white/70 flex justify-between items-center">
+                orders.map((order) => (
+                  <div
+                    key={order.id}
+                    className="flex items-center justify-between p-4 sm:p-3 border-b border-purple-100"
+                  >
                     <div>
-                      <div className="font-semibold">{order.order_number}</div>
-                      <div className="text-xs text-gray-500">{new Date(order.created_at).toLocaleString()}</div>
-                      <div className="text-sm text-gray-700">${order.total_amount}</div>
+                      <h4 className="font-semibold text-gray-800 sm:text-sm">{order.order_number}</h4>
+                      <p className="text-sm sm:text-xs text-gray-600">${order.total_amount}</p>
+                      <p className="text-xs sm:text-[10px] text-gray-500">
+                        {new Date(order.created_at).toLocaleDateString()}
+                      </p>
                     </div>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(order.status)}`}>{order.status}</span>
+                    <span
+                      className={`px-3 py-1 sm:px-2 sm:py-0.5 rounded-full text-xs sm:text-[10px] font-medium ${getStatusColor(
+                        order.status
+                      )}`}
+                    >
+                      {order.status.charAt(0).toUpperCase() + order.status.slice(1)}
+                    </span>
                   </div>
                 ))
               )}
-            </div>
+            </ScrollArea>
           </DialogContent>
         </Dialog>
+
+        {/* Packages Dialog */}
         <Dialog open={showPackages} onOpenChange={setShowPackages}>
-          <DialogContent className="max-w-lg">
-            <DialogHeader><DialogTitle>Track Packages</DialogTitle></DialogHeader>
-            <div className="space-y-4 max-h-96 overflow-y-auto">
+          <DialogContent className="max-w-2xl sm:max-w-[90%] bg-white/95 backdrop-blur-sm border-purple-100">
+            <DialogHeader>
+              <DialogTitle className="text-purple-700">Track Packages</DialogTitle>
+            </DialogHeader>
+            <ScrollArea className="max-h-[60vh] sm:max-h-[50vh]">
               {packages.length === 0 ? (
-                <p className="text-gray-500">No packages found.</p>
+                <p className="text-gray-500 text-center py-4 sm:text-sm">No packages found.</p>
               ) : (
-                packages.map(pkg => (
-                  <div key={pkg.id} className="p-4 border rounded-lg bg-white/70 flex justify-between items-center">
-                    <div>
-                      <div className="font-semibold">{pkg.tracking_number}</div>
-                      <div className="text-xs text-gray-500">{pkg.carrier}</div>
-                      <div className="text-sm text-gray-700">{pkg.status} - {pkg.current_location}</div>
-                      <div className="text-xs text-gray-400">Est. Delivery: {pkg.estimated_delivery}</div>
+                packages.map((pkg) => (
+                  <div
+                    key={pkg.id}
+                    className="p-4 sm:p-3 border-b border-purple-100"
+                  >
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-semibold text-gray-800 sm:text-sm">
+                        Tracking #{pkg.tracking_number}
+                      </h4>
+                      <span
+                        className={`px-3 py-1 sm:px-2 sm:py-0.5 rounded-full text-xs sm:text-[10px] font-medium ${getStatusColor(
+                          pkg.status
+                        )}`}
+                      >
+                        {pkg.status.charAt(0).toUpperCase() + pkg.status.slice(1)}
+                      </span>
                     </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </DialogContent>
-        </Dialog>
-        <Dialog open={showSettings} onOpenChange={setShowSettings}>
-          <DialogContent className="max-w-lg">
-            <DialogHeader>
-              <DialogTitle>Profile Settings</DialogTitle>
-              <p className="text-sm text-gray-500">Manage your account details and preferences.</p>
-            </DialogHeader>
-            <div className="space-y-6">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Full Name</label>
-                <input
-                  type="text"
-                  className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
-                  value={editProfile.full_name}
-                  onChange={e => setEditProfile(p => ({ ...p, full_name: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Company</label>
-                <input
-                  type="text"
-                  className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
-                  value={editProfile.company}
-                  onChange={e => setEditProfile(p => ({ ...p, company: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Email</label>
-                <input
-                  type="email"
-                  className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 bg-gray-100 cursor-not-allowed"
-                  value={profile?.email || ''}
-                  readOnly
-                />
-              </div>
-              <div className="border-t pt-6 space-y-4">
-                <div className="relative flex items-start">
-                  <div className="flex items-center h-5">
-                    <input id="email-notifications" name="email-notifications" type="checkbox" className="focus:ring-purple-500 h-4 w-4 text-purple-600 border-gray-300 rounded" checked={emailNotifications} onChange={e => setEmailNotifications(e.target.checked)} />
-                  </div>
-                  <div className="ml-3 text-sm">
-                    <label htmlFor="email-notifications" className="font-medium text-gray-700">Email Notifications</label>
-                    <p className="text-gray-500">Receive email notifications for payment updates and tenant activities.</p>
-                  </div>
-                </div>
-                <div className="relative flex items-start">
-                  <div className="flex items-center h-5">
-                    <input id="sms-notifications" name="sms-notifications" type="checkbox" className="focus:ring-purple-500 h-4 w-4 text-purple-600 border-gray-300 rounded" checked={smsNotifications} onChange={e => setSmsNotifications(e.target.checked)} />
-                  </div>
-                  <div className="ml-3 text-sm">
-                    <label htmlFor="sms-notifications" className="font-medium text-gray-700">SMS Notifications</label>
-                    <p className="text-gray-500">Receive SMS notifications for critical updates.</p>
-                  </div>
-                </div>
-              </div>
-              <div className="flex justify-end space-x-3">
-                <Button variant="outline" onClick={() => setShowSettings(false)} className="border-purple-200 hover:bg-purple-50">
-                  Cancel
-                </Button>
-                <Button onClick={handleSaveProfile} className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600" disabled={savingProfile}>
-                  {savingProfile ? 'Saving...' : 'Save Changes'}
-                </Button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
-        <Dialog open={showWallet} onOpenChange={setShowWallet}>
-          <DialogContent className="max-w-lg">
-            <DialogHeader>
-              <DialogTitle>Connect Payman Wallet</DialogTitle>
-              <DialogDescription>
-                {walletError ? (
-                  <p className="text-red-500">{walletError}</p>
-                ) : (
-                  'Connecting to your Payman wallet. Please complete the authentication in the popup window.'
-                )}
-              </DialogDescription>
-            </DialogHeader>
-          </DialogContent>
-        </Dialog>
-        <Dialog open={showPayment} onOpenChange={setShowPayment}>
-          <DialogContent className="max-w-lg">
-            <DialogHeader>
-              <DialogTitle>Confirm Payment</DialogTitle>
-            </DialogHeader>
-            {lastSelectedProductRef.current && (
-              <div className="space-y-4">
-                <div className="flex items-center space-x-4">
-                  <img src="/placeholder-product.jpg" alt="Product" className="w-16 h-16 rounded-lg" />
-                  <div>
-                    <h3 className="font-semibold">{lastSelectedProductRef.current.product_name}</h3>
-                    <p className="text-sm text-gray-600">
-                      ${lastSelectedProductRef.current.offer_price ?? lastSelectedProductRef.current.product_price}
+                    <p className="text-sm sm:text-xs text-gray-600 mt-1">
+                      Location: {pkg.current_location}
+                    </p>
+                    <p className="text-sm sm:text-xs text-gray-600">
+                      Estimated Delivery:{' '}
+                      {new Date(pkg.estimated_delivery).toLocaleDateString()}
+                    </p>
+                    <p className="text-xs sm:text-[10px] text-gray-500 mt-1">
+                      Carrier: {pkg.carrier}
                     </p>
                   </div>
+                ))
+              )}
+            </ScrollArea>
+          </DialogContent>
+        </Dialog>
+
+        {/* Settings Dialog */}
+        <Dialog open={showSettings} onOpenChange={setShowSettings}>
+          <DialogContent className="sm:max-w-[90%] bg-white/95 backdrop-blur-sm border-purple-100">
+            <DialogHeader>
+              <DialogTitle className="text-purple-700">Settings</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-6 sm:space-y-4">
+              <div>
+                <label className="block text-sm sm:text-xs font-medium text-gray-700">
+                  Full Name
+                </label>
+                <input
+                  type="text"
+                  value={editProfile.full_name}
+                  onChange={(e) =>
+                    setEditProfile({ ...editProfile, full_name: e.target.value })
+                  }
+                  className="mt-1 block w-full px-4 py-2 sm:px-3 sm:py-1.5 text-sm sm:text-xs border border-purple-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  placeholder="Your full name"
+                />
+              </div>
+              <div>
+                <label className="block text-sm sm:text-xs font-medium text-gray-700">
+                  Company (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={editProfile.company}
+                  onChange={(e) =>
+                    setEditProfile({ ...editProfile, company: e.target.value })
+                  }
+                  className="mt-1 block w-full px-4 py-2 sm:px-3 sm:py-1.5 text-sm sm:text-xs border border-purple-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  placeholder="Your company name"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <label className="text-sm sm:text-xs font-medium text-gray-700">
+                  Email Notifications
+                </label>
+                <input
+                  type="checkbox"
+                  checked={emailNotifications}
+                  onChange={(e) => setEmailNotifications(e.target.checked)}
+                  className="h-4 w-4 sm:h-3 sm:w-3 text-purple-600 focus:ring-purple-500 border-gray-300 rounded"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <label className="text-sm sm:text-xs font-medium text-gray-700">
+                  SMS Notifications
+                </label>
+                <input
+                  type="checkbox"
+                  checked={smsNotifications}
+                  onChange={(e) => setSmsNotifications(e.target.checked)}
+                  className="h-4 w-4 sm:h-3 sm:w-3 text-purple-600 focus:ring-purple-500 border-gray-300 rounded"
+                />
+              </div>
+              <Button
+                onClick={handleSaveProfile}
+                disabled={savingProfile}
+                className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-2 sm:py-1.5"
+              >
+                {savingProfile ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* Wallet Connection Dialog */}
+        <Dialog open={showWallet} onOpenChange={setShowWallet}>
+          <DialogContent className="sm:max-w-[90%] bg-white/95 backdrop-blur-sm border-purple-100">
+            <DialogHeader>
+              <DialogTitle className="text-purple-700">Connect Payman Wallet</DialogTitle>
+              <DialogDescription>
+                Connect your Payman wallet to make secure payments. You’ll be redirected to authenticate.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="py-4 sm:py-3">
+              <Button
+                className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-2 sm:py-1.5"
+                onClick={() => {
+                  // Redirect to backend's OAuth initiation endpoint
+                  window.location.href = 'https://autocart-backend-8o8e.onrender.com/api/oauth/token';
+                }}
+              >
+                Connect with Payman
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* Payment Confirmation Dialog */}
+        <Dialog open={showPayment} onOpenChange={setShowPayment}>
+          <DialogContent className="sm:max-w-[90%] bg-white/95 backdrop-blur-sm border-purple-100">
+            <DialogHeader>
+              <DialogTitle className="text-purple-700">Confirm Payment</DialogTitle>
+            </DialogHeader>
+            {lastSelectedProductRef.current && (
+              <div className="space-y-4 sm:space-y-3">
+                <p className="text-sm sm:text-xs text-gray-600">
+                  You are about to purchase:
+                </p>
+                <div className="p-4 sm:p-3 bg-gray-50 rounded-lg">
+                  <h4 className="font-semibold text-gray-800 sm:text-sm">
+                    {lastSelectedProductRef.current.product_name}
+                  </h4>
+                  <p className="text-sm sm:text-xs text-gray-600">
+                    Price: $
+                    {lastSelectedProductRef.current.offer_price ??
+                      lastSelectedProductRef.current.product_price}
+                  </p>
+                  <p className="text-sm sm:text-xs text-gray-600">
+                    Seller: {lastSelectedProductRef.current.product_seller}
+                  </p>
                 </div>
-                <div className="border-t pt-4">
-                  <p className="text-sm text-gray-700">Pay using your connected Payman wallet.</p>
-                </div>
-                <div className="flex justify-end space-x-3">
-                  <Button variant="outline" onClick={() => setShowPayment(false)} className="border-purple-200 hover:bg-purple-50">
-                    Cancel
-                  </Button>
+                {paymentStatus === 'processing' ? (
+                  <p className="text-sm sm:text-xs text-gray-600">
+                    Processing your payment...
+                  </p>
+                ) : paymentStatus === 'success' ? (
+                  <p className="text-sm sm:text-xs text-green-600">
+                    Payment successful! Check your orders for details.
+                  </p>
+                ) : paymentStatus === 'error' ? (
+                  <p className="text-sm sm:text-xs text-red-600">
+                    Payment failed. Please try again.
+                  </p>
+                ) : (
                   <Button
-                    onClick={() => handlePaymentConfirmation(lastSelectedProductRef.current!)}
-                    className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
-                    disabled={paymentStatus === 'processing'}
+                    className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-2 sm:py-1.5"
+                    onClick={() =>
+                      handlePaymentConfirmation(lastSelectedProductRef.current!)
+                    }
                   >
-                    {paymentStatus === 'processing' ? 'Processing...' : 'Confirm Payment'}
+                    Confirm Payment
                   </Button>
-                </div>
+                )}
               </div>
             )}
           </DialogContent>
