@@ -1,5 +1,5 @@
 import { PaymanClient } from '@paymanai/payman-ts';
-import { toast } from "@/components/ui/use-toast";
+import { toast } from "sonner";
 
 class PaymanService {
   private client: PaymanClient;
@@ -8,14 +8,14 @@ class PaymanService {
   private isInitialized: boolean = false;
 
   private readonly clientId = import.meta.env.VITE_PAYMAN_CLIENT_ID;
-  private readonly clientSecret = import.meta.env.VITE_PAYMAN_CLIENT_SECRET;
   private readonly scopes = 'read_balance read_list_payees write_create_payee write_send_payment';
+  private readonly apiBaseUrl = 'https://autocart-backend-8o8e.onrender.com';
 
   constructor() {
-    // Initialize with credentials for non-authenticated operations
-    this.client = PaymanClient.withCredentials({
-      clientId: this.clientId,
-      clientSecret: this.clientSecret,
+    // Initialize with just client ID for token-based operations
+    this.client = PaymanClient.withToken(this.clientId, {
+      accessToken: '',
+      expiresIn: 0
     });
     this.initializeSync();
   }
@@ -65,31 +65,37 @@ class PaymanService {
   async exchangeCodeForToken(code: string): Promise<{ accessToken: string; expiresIn: number }> {
     try {
       console.log('Exchanging OAuth code:', code);
-      const authClient = PaymanClient.withAuthCode(
-        {
-          clientId: this.clientId,
-          clientSecret: this.clientSecret,
+      
+      // Call backend API to exchange code for token
+      const response = await fetch(`${this.apiBaseUrl}/api/oauth/token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-        code
-      );
-      const tokenResponse = await authClient.getAccessToken();
-      this.initializeWithToken(tokenResponse.accessToken, tokenResponse.expiresIn);
+        body: JSON.stringify({ code })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Token exchange failed');
+      }
+
+      const tokenResponse = await response.json();
+      
+      this.initializeWithTokenPrivate(tokenResponse.accessToken, tokenResponse.expiresIn);
+      
       return {
         accessToken: tokenResponse.accessToken,
         expiresIn: tokenResponse.expiresIn,
       };
     } catch (error) {
       console.error('Token exchange failed:', error);
-      toast({
-        title: 'Authentication Failed',
-        description: 'Failed to authenticate with Payman.',
-        variant: 'destructive',
-      });
+      toast.error('Failed to authenticate with Payman.');
       throw error;
     }
   }
 
-  private initializeWithToken(accessToken: string, expiresIn: number) {
+  private initializeWithTokenPrivate(accessToken: string, expiresIn: number) {
     this.accessToken = accessToken;
     this.tokenExpiry = Date.now() + expiresIn * 1000;
     localStorage.setItem('payman_access_token', accessToken);
@@ -102,14 +108,20 @@ class PaymanService {
     console.log('PaymanService: Initialized with new user token');
   }
 
+  // Public method to initialize with token (called from Dashboard)
+  initializeWithToken(accessToken: string, expiresIn: number) {
+    this.initializeWithTokenPrivate(accessToken, expiresIn);
+  }
+
   private clearAuth() {
     this.accessToken = null;
     this.tokenExpiry = null;
     localStorage.removeItem('payman_access_token');
     localStorage.removeItem('payman_token_expiry');
-    this.client = PaymanClient.withCredentials({
-      clientId: this.clientId,
-      clientSecret: this.clientSecret,
+    // Reset client without token
+    this.client = PaymanClient.withToken(this.clientId, {
+      accessToken: '',
+      expiresIn: 0
     });
     console.log('PaymanService: Authentication cleared');
   }
@@ -151,6 +163,26 @@ class PaymanService {
       console.log('Payment sent successfully from user account:', response);
     } catch (error) {
       console.error('Error sending payment:', error);
+      throw error;
+    }
+  }
+
+  async getWalletBalance(): Promise<string> {
+    if (!this.isAuthenticated()) {
+      throw new Error('User not authenticated');
+    }
+    try {
+      const balance = await this.client.ask("what's my wallet balance?");
+      // If balance is an object, extract the string value
+      if (typeof balance === 'string') {
+        return balance;
+      } else if (balance && typeof balance === 'object' && 'result' in balance) {
+        return (balance as any).result ?? JSON.stringify(balance);
+      } else {
+        return JSON.stringify(balance);
+      }
+    } catch (error) {
+      console.error('Error getting wallet balance:', error);
       throw error;
     }
   }

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Tables } from "@/integrations/supabase/types";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { PaymanClient } from "@paymanai/payman-ts";
+import { paymanService } from "@/services/PaymanService";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 // =================================================================================
@@ -336,9 +337,9 @@ const Dashboard = () => {
   const [showPackages, setShowPackages] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showWallet, setShowWallet] = useState(false);
-  const [walletConnected, setWalletConnected] = useState(false);
+  const [walletConnected, setWalletConnected] = useState(paymanService.isAuthenticated());
   const [walletBalance, setWalletBalance] = useState<string | null>(null); // Added for wallet balance
-  const [accessToken, setAccessToken] = useState<string | null>(null); // Added for access token
+  const [accessToken, setAccessToken] = useState<string | null>(null);
   const [editProfile, setEditProfile] = useState({ full_name: '', company: '' });
   const [emailNotifications, setEmailNotifications] = useState(true);
   const [smsNotifications, setSmsNotifications] = useState(false);
@@ -364,46 +365,14 @@ const Dashboard = () => {
   const lastIntentRef = useRef<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Load Payman Connect script dynamically when wallet dialog opens
+  // Check for OAuth success on component mount
   useEffect(() => {
-    if (!showWallet) return;
-
-    const script = document.createElement('script');
-    script.src = 'https://app.paymanai.com/js/pm-connect.js';
-    script.async = true;
-    script.setAttribute('data-client-id', 'pm-test-3BL-0TI1SH8P--0YibbhNWqD');
-    script.setAttribute('data-scopes', 'read_balance read_list_payees send_payments create_payees');
-    script.setAttribute('data-redirect-uri', 'https://autocart-backend-8o8e.onrender.com/api/oauth/callback');
-    script.setAttribute('data-target', '#payman-connect-wallet');
-    script.setAttribute('data-dark-mode', 'false');
-    script.setAttribute('strategy', 'afterInteractive');
-    script.setAttribute('data-styles', JSON.stringify({ borderRadius: '8px', fontSize: '14px' }));
-
-    document.body.appendChild(script);
-
-    // Check if the button rendered after a timeout
-    const timeout = setTimeout(() => {
-      const paymanButtonContainer = document.querySelector('#payman-connect-wallet');
-      const paymanButton = paymanButtonContainer?.querySelector('button');
-      if (!paymanButton) {
-        // If the button didn't render, show the fallback
-        const fallbackContainer = document.querySelector('#payman-connect-fallback');
-        if (fallbackContainer) {
-          (fallbackContainer as HTMLElement).style.display = 'block';
-        }
-      }
-    }, 3000); // Wait 3 seconds for the script to render the button
-
-    // Cleanup script and timeout when dialog closes
-    return () => {
-      document.body.removeChild(script);
-      clearTimeout(timeout);
-      const fallbackContainer = document.querySelector('#payman-connect-fallback');
-      if (fallbackContainer) {
-        (fallbackContainer as HTMLElement).style.display = 'none';
-      }
-    };
-  }, [showWallet]);
+    const wasOAuthInitiated = sessionStorage.getItem('payman_oauth_initiated');
+    if (wasOAuthInitiated) {
+      sessionStorage.removeItem('payman_oauth_initiated');
+      // OAuth callback handling is done by the URL parameter effect below
+    }
+  }, []);
 
   // Calculate total saved
   const totalSaved = orders.reduce((sum, order) => {
@@ -425,54 +394,18 @@ const Dashboard = () => {
     }, 0);
   }, 0);
 
-  // Handle OAuth callback parameters (after backend redirects to /dashboard)
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const accessToken = params.get('access_token');
-    const expiresIn = params.get('expires_in');
-    const error = params.get('error');
-    const errorDescription = params.get('error_description');
-
-    if (error) {
-      setWalletError(`OAuth Error: ${error}${errorDescription ? ` - ${errorDescription}` : ''}`);
-      setShowWallet(false);
-      return;
-    }
-
-    if (accessToken) {
-      setAccessToken(accessToken);
-      setWalletConnected(true);
-      setShowWallet(false);
-      toast.success('Wallet connected successfully!');
-      window.history.replaceState({}, document.title, '/dashboard');
-    }
-  }, [location]);
-
   // Fetch wallet balance after access token is available
   useEffect(() => {
-    if (accessToken) {
-      const client = PaymanClient.withToken('pm-test-3BL-0TI1SH8P--0YibbhNWqD', {
-        accessToken,
-        expiresIn: 3600, // Default to 1 hour; adjust based on token response
-      });
-
-      client
-        .ask("what's my wallet balance?")
+    if (paymanService.isAuthenticated()) {
+      paymanService.getWalletBalance()
         .then(balance => {
-          // If balance is an object, extract the string value
-          if (typeof balance === 'string') {
-            setWalletBalance(balance);
-          } else if (balance && typeof balance === 'object' && 'result' in balance) {
-            setWalletBalance((balance as any).result ?? JSON.stringify(balance));
-          } else {
-            setWalletBalance(JSON.stringify(balance));
-          }
+          setWalletBalance(balance);
         })
         .catch(error => {
           setWalletError(`Failed to fetch wallet balance: ${error.message}`);
         });
     }
-  }, [accessToken]);
+  }, [walletConnected]);
 
   // Save message
   const saveMessage = useCallback(async (conversationId: string, sender: 'user' | 'ai', content: string) => {
@@ -704,6 +637,36 @@ const Dashboard = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Handle OAuth callback from Render backend
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const accessToken = urlParams.get('access_token');
+    const expiresIn = urlParams.get('expires_in');
+    const error = urlParams.get('error');
+    const errorDescription = urlParams.get('error_description');
+
+    if (error) {
+      console.error('OAuth Error:', error, errorDescription);
+      setWalletError(`OAuth Error: ${error} - ${errorDescription || 'Unknown error'}`);
+      // Clear URL parameters
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, '', newUrl);
+      return;
+    }
+
+    if (accessToken && expiresIn) {
+      console.log('OAuth success, received access token');
+      // Initialize PaymanService with the token
+      paymanService.initializeWithToken(accessToken, parseInt(expiresIn));
+      setAccessToken(accessToken);
+      setWalletConnected(true);
+      toast.success('Wallet connected successfully!');
+      // Clear URL parameters
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, '', newUrl);
+    }
+  }, []);
+
   // Event Handlers
   const handleSignOut = useCallback(async () => {
     await signOut();
@@ -737,37 +700,96 @@ const Dashboard = () => {
   }, [profile, editProfile, emailNotifications, smsNotifications]);
 
   const handleConnectWallet = useCallback(() => {
-    setShowWallet(true);
-    setWalletError(null);
+    // Option 1: Direct redirect approach (recommended for your setup)
+    const redirectUri = import.meta.env.VITE_PAYMAN_REDIRECT_URI;
+    const authUrl = `https://app.paymanai.com/oauth/authorize?client_id=${import.meta.env.VITE_PAYMAN_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent('read_balance read_list_payees write_create_payee write_send_payment')}`;
+    
+    // Store current page state before redirect
+    sessionStorage.setItem('payman_oauth_initiated', 'true');
+    
+    // Direct redirect - no popup needed
+    window.location.href = authUrl;
+    
+    // Option 2: Use dialog with Payman Connect script (alternative)
+    // setShowWallet(true);
   }, []);
 
+  const handleOAuthCodeExchange = useCallback(async (code: string) => {
+    try {
+      setWalletError(null);
+      const { accessToken, expiresIn } = await paymanService.exchangeCodeForToken(code);
+      setAccessToken(accessToken);
+      setWalletConnected(true);
+      toast.success('Wallet connected successfully!');
+    } catch (error: any) {
+      console.error('OAuth token exchange failed:', error);
+      setWalletError(`Failed to connect wallet: ${error.message || 'Unknown error'}`);
+    }
+  }, []);
+
+  // Load Payman Connect script dynamically when wallet dialog opens
+  useEffect(() => {
+    if (!showWallet) return;
+
+    const script = document.createElement('script');
+    script.src = 'https://app.paymanai.com/js/pm.js';
+    script.async = true;
+    script.setAttribute('data-client-id', import.meta.env.VITE_PAYMAN_CLIENT_ID);
+    script.setAttribute('data-scopes', 'read_balance,read_list_payees,write_create_payee,write_send_payment');
+    script.setAttribute('data-redirect-uri', import.meta.env.VITE_PAYMAN_REDIRECT_URI);
+    script.setAttribute('data-target', '#payman-connect');
+    script.setAttribute('data-dark-mode', 'false');
+    script.setAttribute('strategy', 'afterInteractive');
+    script.setAttribute('data-styles', JSON.stringify({ borderRadius: '8px', fontSize: '14px' }));
+
+    document.body.appendChild(script);
+
+    // Listen for OAuth messages from Payman Connect
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data.type === 'payman-oauth-redirect') {
+        const url = new URL(event.data.redirectUri);
+        const code = url.searchParams.get('code');
+        const error = url.searchParams.get('error');
+        
+        console.log('Payman OAuth callback received:', { code, error });
+        
+        if (error) {
+          setWalletError(`OAuth Error: ${error}`);
+          setShowWallet(false);
+          return;
+        }
+        
+        if (code) {
+          handleOAuthCodeExchange(code);
+          setShowWallet(false);
+        }
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      document.body.removeChild(script);
+    };
+  }, [showWallet, handleOAuthCodeExchange]);
+
   const handlePaymentConfirmation = useCallback(async (product: Tables<'products'>) => {
-  if (!accessToken) {
-    toast.error('Wallet not connected. Please connect your Payman wallet.');
-    setShowPayment(false);
-    return;
-  }
-  setPaymentStatus('processing');
-  try {
-    const client = PaymanClient.withToken('pm-test-3BL-0TI1SH8P--0YibbhNWqD', {
-      accessToken,
-      expiresIn: 3600,
-    });
-    const amount = product.offer_price ?? product.product_price;
-    const sellerEmail = `${product.product_seller.replace(/\s/g, '').toLowerCase()}@autocart.com`;
-    const orderId = `ORD${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    if (!paymanService.isAuthenticated()) {
+      toast.error('Wallet not connected. Please connect your Payman wallet.');
+      setShowPayment(false);
+      return;
+    }
+    
+    setPaymentStatus('processing');
+    try {
+      const amount = product.offer_price ?? product.product_price;
+      const sellerEmail = `${product.product_seller.replace(/\s/g, '').toLowerCase()}@autocart.com`;
+      const orderId = `ORD${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
-    // Create the payee if it doesn't exist
-    await client.ask(`create a new payee named ${product.product_seller} with email ${sellerEmail}`);
-
-    // Process the payment using client.ask with natural language
-    await client.ask(`pay $${amount} to ${product.product_seller}`, {
-      metadata: {
-        orderId,
-        productId: product.product_id,
-        description: `Purchase of ${product.product_name} via AutoCart`,
-      },
-    });
+      // Create the payee and process payment using PaymanService
+      await paymanService.createPayee(sellerEmail, product.product_seller);
+      await paymanService.sendPayment(amount, product.product_seller, product.product_id, orderId);
 
     // Save order to Supabase
     const { data: orderData, error: orderError } = await supabase
@@ -936,7 +958,7 @@ const Dashboard = () => {
         break;
       }
       case "yes": {
-        if (!walletConnected) {
+        if (!paymanService.isAuthenticated()) {
           const aiMessage: Message = {
             id: messages.length + 2,
             sender: "ai",
@@ -1796,27 +1818,26 @@ const Dashboard = () => {
           </DialogContent>
         </Dialog>
 
-        {/* Wallet Connection Dialog */}
+        {/* Payman Wallet Connect Dialog */}
         <Dialog open={showWallet} onOpenChange={setShowWallet}>
-          <DialogContent className="sm:max-w-[90%] bg-white/95 backdrop-blur-sm border-purple-100">
+          <DialogContent className="sm:max-w-md bg-white/95 backdrop-blur-sm border-purple-100">
             <DialogHeader>
-              <DialogTitle className="text-purple-700">Connect Payman Wallet</DialogTitle>
-              <DialogDescription>
-                Connect your Payman wallet to make secure payments. Click the button below to authenticate.
-              </DialogDescription>
+              <DialogTitle className="text-purple-700 text-center">Connect Your Payman Wallet</DialogTitle>
             </DialogHeader>
-            <div className="py-4 sm:py-3 flex justify-center">
-              <div id="payman-connect-wallet" className="min-h-[40px]"></div>
-              {/* Fallback button in case pm-connect.js fails to render */}
-              <div id="payman-connect-fallback" style={{ display: 'none' }}>
-                <Button
-                  className="w-full max-w-xs bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-2 sm:py-1.5"
-                  onClick={() => {
-                    window.location.href = `https://app.paymanai.com/oauth/authorize?client_id=pm-test-3BL-0TI1SH8P--0YibbhNWqD&redirect_uri=${encodeURIComponent('https://autocart-backend-8o8e.onrender.com/api/oauth/callback')}&response_type=code&scope=read_balance%20read_list_payees%20send_payments`;
-                  }}
-                >
-                  Connect with Payman (Fallback)
-                </Button>
+            <div className="space-y-4">
+              {walletError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+                  <p className="text-sm text-red-600">{walletError}</p>
+                </div>
+              )}
+              <div className="text-center space-y-2">
+                <p className="text-sm text-gray-600">
+                  Connect your Payman wallet to make secure payments
+                </p>
+                {/* Payman Connect will render here */}
+                <div id="payman-connect" className="min-h-[200px] flex items-center justify-center">
+                  <div className="text-sm text-gray-400">Loading Payman Connect...</div>
+                </div>
               </div>
             </div>
           </DialogContent>

@@ -13,6 +13,8 @@ dist-ssr
 *.local
 
 .env
+.env.server
+.env.new
 fakedata generator/venv/
 
 # Editor directories and files
